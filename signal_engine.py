@@ -45,8 +45,8 @@ alice = Aliceblue(user_id=str(ALICE_USER_ID), api_key=ALICE_API_KEY)
 session_id = alice.get_session_id()
 
 # Timezone definitions
- tz_utc = timezone.utc
- tz_ist = timezone(timedelta(hours=5, minutes=30))
+tz_utc = timezone.utc
+tz_ist = timezone(timedelta(hours=5, minutes=30))
 
 # --- Upstash Redis helpers ---
 def load_states(key):
