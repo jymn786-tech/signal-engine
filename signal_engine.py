@@ -8,15 +8,13 @@ from datetime import datetime, time, timezone, timedelta
 from pya3 import Aliceblue
 
 # === ENVIRONMENT VARIABLES ===
-# Support both old and new Upstash secret names
 REQUIRED_VARS = [
     "ALICE_USER_ID",
     "ALICE_API_KEY",
     "SYMBOL_LIST",
     "WEBHOOK_URL",
-    # Either of these two pairs must be set
-    # "UPSTASH_REDIS_URL", "UPSTASH_REDIS_TOKEN"
 ]
+
 # Load required secrets
 missing = [var for var in REQUIRED_VARS if not os.getenv(var)]
 if missing:
@@ -44,8 +42,8 @@ alice = Aliceblue(user_id=str(ALICE_USER_ID), api_key=ALICE_API_KEY)
 session_id = alice.get_session_id()
 
 # Timezone definitions
-tz_utc = timezone.utc
-tz_ist = timezone(timedelta(hours=5, minutes=30))
+ tz_utc = timezone.utc
+ tz_ist = timezone(timedelta(hours=5, minutes=30))
 
 # --- Upstash Redis helpers ---
 def load_states(key):
@@ -79,15 +77,17 @@ def main():
     now_ist = now_utc.astimezone(tz_ist)
     print(f"▶️ Invoked at {now_utc.isoformat()} UTC / {now_ist.isoformat()} IST")
 
-    #if now_ist.weekday() > 4 or not (time(9, 15) <= now_ist.time() <= time(15, 0)):
-    #    print(f"⏸ Outside market hours: {now_ist.time()}")
-    #    return
+    # Prepare date-only range for AliceBlue
+    today_str = now_ist.strftime("%d-%m-%Y")
+    from_date = datetime.strptime(today_str, "%d-%m-%Y")
+    to_date   = datetime.strptime(today_str, "%d-%m-%Y")
 
+    # Load or initialize today's state
     today_key = now_ist.date().isoformat()
     states = load_states(today_key)
     print(f"🔔 Loaded state for {len(states)} symbols")
 
-    # Initialize daily_open
+    # Initialize daily_open for new symbols
     to_init = [s for s in SYMBOLS if s not in states]
     if to_init:
         print(f"🔔 Initializing daily_open for: {to_init}")
@@ -96,42 +96,56 @@ def main():
                 instr = alice.get_instrument_by_symbol(symbol=sym, exchange="NSE")
                 hist = alice.get_historical(
                     instr,
-                    now_ist.replace(hour=0, minute=0, second=0, microsecond=0),
-                    now_ist,
+                    from_date,
+                    to_date,
                     "1",
                     indices=False
                 )
-                if not hist.empty:
-                    op = hist.iloc[0]['open']
-                    states[sym] = {"daily_open": op, "surge_detected": False, "signal_sent": False}
-                    print(f"💾 Set daily_open for {sym}: {op}")
+                # Handle API errors
+                if isinstance(hist, dict) and 'error' in hist:
+                    print(f"❌ Error fetching data for {sym}: {hist['error']}")
+                    continue
+                # Skip if no usable data
+                if hist.empty or hist.isnull().values.any():
+                    print(f"⚠️ No valid data for {sym} on {today_str}.")
+                    continue
+                # Record today's open
+                op = hist.iloc[0]['open']
+                states[sym] = {"daily_open": op, "surge_detected": False, "signal_sent": False}
+                print(f"💾 Set daily_open for {sym}: {op}")
             except Exception as e:
                 print(f"❌ Init failed for {sym}: {e}")
         save_states(today_key, states)
 
+    # Main loop: detect surge & drop signals
     changed_any = False
     for sym, st in list(states.items()):
-        if st.get("signal_sent"): continue
+        if st.get("signal_sent"):  # skip already-signaled
+            continue
         try:
             instr = alice.get_instrument_by_symbol(symbol=sym, exchange="NSE")
             hist = alice.get_historical(
                 instr,
-                now_ist.replace(hour=0, minute=0, second=0, microsecond=0),
-                now_ist,
+                from_date,
+                to_date,
                 "1",
                 indices=False
             )
-            if hist.empty: continue
+            if isinstance(hist, dict) and 'error' in hist:
+                print(f"❌ Error fetching data for {sym}: {hist['error']}")
+                continue
+            if hist.empty or hist.isnull().values.any():
+                continue
 
             changed = False
-            # Surge
+            # Surge detection before 9:30
             if not st["surge_detected"] and now_ist.time() <= time(9, 30):
                 if hist['high'].max() > st['daily_open'] * 1.02:
                     st['surge_detected'] = True
                     st['surge_time']     = now_ist.isoformat()
                     changed = True
                     print(f"🚀 Surge {sym}: high {hist['high'].max()}")
-            # Drop
+            # Drop signal before 12:00:59
             if st['surge_detected'] and not st['signal_sent'] and now_ist.time() <= time(12, 0, 59):
                 if hist['low'].min() <= st['daily_open']:
                     payload = {
@@ -162,11 +176,13 @@ def main():
         except Exception as e:
             print(f"❌ Error for {sym}: {e}")
 
+    # Persist state if anything changed
     if changed_any:
         save_states(today_key, states)
         print(f"💾 State saved ({len(states)} symbols)")
     else:
         print("💾 No state changes")
+
 
 if __name__ == "__main__":
     main()
