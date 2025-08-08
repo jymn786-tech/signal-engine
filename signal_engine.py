@@ -79,9 +79,9 @@ def main():
     now_ist = now_utc.astimezone(tz_ist)
     print(f"▶️ Invoked at {now_utc.isoformat()} UTC / {now_ist.isoformat()} IST")
 
-    if now_ist.weekday() > 4 or not (time(9, 15) <= now_ist.time() <= time(15, 0)):
-        print(f"⏸ Outside market hours: {now_ist.time()}")
-        return
+    #if now_ist.weekday() > 4 or not (time(9, 15) <= now_ist.time() <= time(15, 0)):
+    #    print(f"⏸ Outside market hours: {now_ist.time()}")
+    #    return
 
     today_key = now_ist.date().isoformat()
     states = load_states(today_key)
