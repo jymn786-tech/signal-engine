@@ -1,15 +1,30 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 
 import os
 import json
+import sys
 import urllib3
 from datetime import datetime, time, timezone, timedelta
 from pya3 import Aliceblue
 
 # === ENVIRONMENT VARIABLES ===
+REQUIRED_VARS = [
+    "ALICE_USER_ID",
+    "ALICE_API_KEY",
+    "SYMBOL_LIST",
+    "WEBHOOK_URL",
+    "UPSTASH_REDIS_URL",
+    "UPSTASH_REDIS_TOKEN"
+]
+# Check that all required env vars are present
+missing = [var for var in REQUIRED_VARS if not os.getenv(var)]
+if missing:
+    print(f"❌ Missing environment variables: {', '.join(missing)}")
+    sys.exit(1)
+
 ALICE_USER_ID   = os.getenv("ALICE_USER_ID")
 ALICE_API_KEY   = os.getenv("ALICE_API_KEY")
-SYMBOL_LIST_RAW = os.getenv("SYMBOL_LIST", "")
+SYMBOL_LIST_RAW = os.getenv("SYMBOL_LIST")
 SYMBOLS         = [s.strip() for s in SYMBOL_LIST_RAW.split(",") if s.strip()]
 WEBHOOK_URL     = os.getenv("WEBHOOK_URL")
 UPSTASH_URL     = os.getenv("UPSTASH_REDIS_URL").rstrip("/")
@@ -21,8 +36,8 @@ alice = Aliceblue(user_id=str(ALICE_USER_ID), api_key=ALICE_API_KEY)
 session_id = alice.get_session_id()
 
 # Timezone definitions
-TZ_UTC = timezone.utc
-TZ_IST = timezone(timedelta(hours=5, minutes=30))
+tz_utc = timezone.utc
+tz_ist = timezone(timedelta(hours=5, minutes=30))
 
 # --- Upstash Redis helpers ---
 def load_states(key):
@@ -60,8 +75,8 @@ def save_states(key, states):
 
 def main():
     # Compute current UTC and IST times
-    now_utc = datetime.now(TZ_UTC)
-    now_ist = now_utc.astimezone(TZ_IST)
+    now_utc = datetime.now(tz_utc)
+    now_ist = now_utc.astimezone(tz_ist)
     print(f"▶️ Invoked at {now_utc.isoformat()} UTC / {now_ist.isoformat()} IST")
 
     # Gate: only run Mon–Fri 09:15–15:00 IST
@@ -109,9 +124,9 @@ def main():
             hist  = alice.get_historical(
                 instr,
                 now_ist.replace(hour=0, minute=0, second=0, microsecond=0),
-                now_ist,
-                "1",
-                indices=False
+                    now_ist,
+                    "1",
+                    indices=False
             )
             if hist.empty:
                 continue
@@ -168,4 +183,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
