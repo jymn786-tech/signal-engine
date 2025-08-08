@@ -2,26 +2,26 @@ name: Surge & Drop Scheduler
 
 on:
   schedule:
-    - cron:  '* * * * *'    # every minute
+    - cron: '* * * * *'    # every minute
   workflow_dispatch: {}
 
 jobs:
   run-signal-engine:
     runs-on: ubuntu-latest
     env:
-      ALICE_USER_ID:   ${{ secrets.ALICE_USER_ID }}
-      ALICE_API_KEY:   ${{ secrets.ALICE_API_KEY }}
-      SYMBOL_LIST:     ${{ secrets.SYMBOL_LIST }}
-      WEBHOOK_URL:     ${{ secrets.WEBHOOK_URL }}
-      S3_BUCKET:       ${{ secrets.S3_BUCKET }}
-      S3_KEY_PREFIX:   ${{ secrets.S3_KEY_PREFIX }}
+      ALICE_USER_ID:       ${{ secrets.ALICE_USER_ID }}
+      ALICE_API_KEY:       ${{ secrets.ALICE_API_KEY }}
+      SYMBOL_LIST:         ${{ secrets.SYMBOL_LIST }}
+      WEBHOOK_URL:         ${{ secrets.WEBHOOK_URL }}
+      UPSTASH_REDIS_URL:   ${{ secrets.UPSTASH_REDIS_REST_URL }}
+      UPSTASH_REDIS_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.9
+          python-version: '3.9'
 
       - name: Install dependencies
         run: |
