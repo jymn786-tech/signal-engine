@@ -1,0 +1,4 @@
+pya3
+requests
+boto3
+urllib3
