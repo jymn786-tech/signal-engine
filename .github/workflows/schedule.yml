@@ -1,29 +1,18 @@
-name: Signal Engine (Test Minute Loop)
+name: Signal Engine (Prod Minute Loop)
 
 on:
   workflow_dispatch:
-    inputs:
-      end_utc:
-        description: "End time today in UTC (HH:MM:SS), e.g. 08:10:00"
-        required: false
-        default: "07:30:00"
-      surge_pct:
-        description: "Surge threshold as fraction (0.002 = 0.2%)"
-        required: false
-        default: "0.02"
-      test_date:
-        description: "Force date DD-MM-YYYY (optional, if supported in your code)"
-        required: false
-        default: ""
+  schedule:
+    - cron: '45 3 * * 1-5'  # Start at 03:45 UTC (== 09:15 IST), Mon–Fri
 
 concurrency:
-  group: engine-minute-loop-test
+  group: engine-minute-loop-prod
   cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 200
 
     steps:
       - name: Checkout
@@ -43,25 +32,23 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      - name: Minute loop (manual test)
+      - name: Minute loop (03:45–06:31 UTC daily)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
           SYMBOL_LIST:   ${{ secrets.SYMBOL_LIST }}
           WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
           CONTRACT_MASTER_DIR: .
-          SURGE_PCT:     ${{ github.event.inputs.surge_pct }}
-          END_UTC:       ${{ github.event.inputs.end_utc }}
-          TEST_DATE:     ${{ github.event.inputs.test_date }}   # only used if your script supports it
+          # Keep your production surge threshold here
+          SURGE_PCT: '0.02'
         run: |
           set -e
           echo "Start UTC: $(date -u +"%F %T")"
-          END_UTC="${END_UTC:-07:30:00}"
-          END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
+          END_TS=$(date -u -d "$(date -u +%F) 06:31:00" +%s)
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$END_TS" ]; then
-              echo "Test window over at $(date -u +"%F %T") UTC"
+              echo "Window over at $(date -u +"%F %T") UTC"
               break
             fi
             python signal_engine.py || true
