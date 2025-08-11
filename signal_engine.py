@@ -43,7 +43,7 @@ tz_utc = timezone.utc
 tz_ist = timezone(timedelta(hours=5, minutes=30))
 
 # Tunables
-SURGE_PCT = float(os.getenv("SURGE_PCT", "0.02"))  # 2% in production; drop to 0.002 for testing
+SURGE_PCT = float(os.getenv("SURGE_PCT", "0.0002"))  # 2% in production; drop to 0.002 for testing
 SURGE_CUTOFF = time(9, 30, 50)   # surge must occur <= 09:30:50 IST
 DROP_CUTOFF  = time(12, 0, 59)   # drop must occur <= 12:00:59 IST
 
