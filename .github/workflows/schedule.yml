@@ -32,8 +32,8 @@ jobs:
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
           SYMBOL_LIST: ${{ secrets.SYMBOL_LIST }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
-          UPSTASH_REDIS_TOKEN: ${{ secrets.UPSTASH_REDIS_TOKEN }}
+          UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           # NSE.csv is at repo root; set dir explicitly (optional)
           CONTRACT_MASTER_DIR: .
         run: |
