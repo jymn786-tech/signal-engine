@@ -193,7 +193,7 @@ def main():
             # Surge before 09:30 IST
             if not st.get("surge_detected") and now_ist.time() <= time(9, 30):
                 high_max = float(hist["high"].max())
-                if high_max > st["daily_open"] * 1.02:
+                if high_max > st["daily_open"] * 1.0002:
                     st["surge_detected"] = True
                     st["surge_time"] = now_ist.isoformat()
                     changed = True
