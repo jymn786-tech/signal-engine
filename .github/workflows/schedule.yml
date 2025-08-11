@@ -1,9 +1,11 @@
 name: Run Signal Engine
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "*/1 * * * 1-5"  # every minute, Monday-Friday
-  workflow_dispatch:  # allows manual run
+    - cron: '45-59 3 * * 1-5'   # 03:45–03:59 UTC  (09:15–09:29 IST)
+    - cron: '* 4-5 * * 1-5'     # 04:00–05:59 UTC  (09:30–11:29 IST)
+    - cron: '0-31 6 * * 1-5'    # 06:00–06:31 UTC  (11:30–12:01 IST)
   
 jobs:
   run:
