@@ -43,7 +43,7 @@ tz_utc = timezone.utc
 tz_ist = timezone(timedelta(hours=5, minutes=30))
 
 # Tunables
-SURGE_PCT = float(os.getenv("SURGE_PCT", "0.0002"))  # 2% in production; drop to 0.002 for testing
+SURGE_PCT = float(os.getenv("SURGE_PCT", "0.02"))  # 2% in production; drop to 0.002 for testing
 SURGE_CUTOFF = time(9, 30, 50)   # surge must occur <= 09:30:50 IST
 DROP_CUTOFF  = time(12, 0, 59)   # drop must occur <= 12:00:59 IST
 
@@ -166,7 +166,7 @@ def analyze_day(hist: pd.DataFrame, surge_pct: float):
     if surge:
         drop_window = hist[(hist["ts"] > surge_hit_time) & (hist["ts"].dt.time <= DROP_CUTOFF)]
         if not drop_window.empty:
-            hit = drop_window.loc[drop_window["low"] <= 1000 ]
+            hit = drop_window.loc[drop_window["low"] <= daily_open ]
             if not hit.empty:
                 drop_after_surge = True
                 drop_hit_time = hit.iloc[0]["ts"]
