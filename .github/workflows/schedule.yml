@@ -23,68 +23,10 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install pya3 urllib3
+            pip install pya3 urllib3 pandas
           fi
 
-      - name: Cache pya3 contract masters
-        uses: actions/cache@v4
-        with:
-          path: ~/.pya3
-          key: pya3-contracts-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            pya3-contracts-${{ runner.os }}-
-
-      - name: Preload AliceBlue contract masters
-        env:
-          ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
-          ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-          ALICE_EXCHANGES: ${{ vars.ALICE_EXCHANGES || 'NSE,INDICES' }}
-        run: |
-          python - <<'PY'
-          import os, time
-          from pya3 import Aliceblue
-          alice = Aliceblue(user_id=os.environ['ALICE_USER_ID'], api_key=os.environ['ALICE_API_KEY'])
-          alice.get_session_id()
-          exchanges = [e.strip() for e in os.environ.get('ALICE_EXCHANGES', 'NSE,INDICES').split(',') if e.strip()]
-          def try_instance(exchange):
-              fn = getattr(alice, 'get_contract_master', None)
-              if callable(fn):
-                  fn(exchange)
-                  print('loaded via instance', exchange)
-                  return True
-              return False
-          def try_module(exchange):
-              try:
-                  from pya3 import contracts as cm
-              except Exception:
-                  return False
-              for name in ('get_contract_master', 'download_contract_master', 'fetch_contract_master'):
-                  fn = getattr(cm, name, None)
-                  if callable(fn):
-                      try:
-                          fn(alice, exchange)
-                      except TypeError:
-                          fn(exchange)
-                      print('loaded via module', exchange, name)
-                      return True
-              return False
-          for ex in exchanges:
-              ok = False
-              for i in range(1, 4):
-                  try:
-                      ok = try_instance(ex) or try_module(ex)
-                      if ok:
-                          break
-                      else:
-                          raise RuntimeError('no contract-master loader matched this pya3 version')
-                  except Exception as e:
-                      print('retry', ex, f'{i}/3:', e)
-                      time.sleep(2 * i)
-              if not ok:
-                  print('WARNING: could not preload', ex)
-          PY
-
-      - name: Run engine
+      - name: Run engine (uses local NSE.csv)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
@@ -92,6 +34,7 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_URL }}
           UPSTASH_REDIS_TOKEN: ${{ secrets.UPSTASH_REDIS_TOKEN }}
-          ALICE_EXCHANGES: ${{ vars.ALICE_EXCHANGES || 'NSE,INDICES' }}
+          # NSE.csv is at repo root; set dir explicitly (optional)
+          CONTRACT_MASTER_DIR: .
         run: |
           python signal_engine.py
