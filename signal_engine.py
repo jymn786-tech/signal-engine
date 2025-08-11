@@ -181,7 +181,7 @@ def main():
 
     # Run only between 09:15 and 12:01 IST (inclusive)
     start_ist = time(9, 15)
-    end_ist   = time(12, 15)
+    end_ist   = time(12, 45)
     if not (start_ist <= now_ist.time() <= end_ist):
         print(f"⏸ Outside trading window (IST): {now_ist.time()}. Skipping.")
         return
