@@ -166,7 +166,7 @@ def analyze_day(hist: pd.DataFrame, surge_pct: float):
     if surge:
         drop_window = hist[(hist["ts"] > surge_hit_time) & (hist["ts"].dt.time <= DROP_CUTOFF)]
         if not drop_window.empty:
-            hit = drop_window.loc[drop_window["low"] <= daily_open * 1.002]
+            hit = drop_window.loc[drop_window["low"] <= 1000 ]
             if not hit.empty:
                 drop_after_surge = True
                 drop_hit_time = hit.iloc[0]["ts"]
