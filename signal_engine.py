@@ -70,8 +70,9 @@ def load_local_masters():
 
 # ---------- Upstash helpers ----------
 def load_states(key: str) -> dict:
-    url = f"{UPSTASH_URL}/get/{key}"
-    r = http.request("GET", url, fields={"token": UPSTASH_TOKEN})
+    # Query param style (no body)
+    url = f"{UPSTASH_URL}/get/{key}?token={UPSTASH_TOKEN}"
+    r = http.request("GET", url)
     if r.status == 200:
         payload = json.loads(r.data.decode("utf-8"))
         data = payload.get("result")
@@ -83,11 +84,11 @@ def load_states(key: str) -> dict:
     return {}
 
 def save_states(key: str, states: dict) -> None:
-    url = f"{UPSTASH_URL}/set/{key}"
+    url = f"{UPSTASH_URL}/set/{key}?token={UPSTASH_TOKEN}"
     body = json.dumps({"value": json.dumps(states)})
     http.request(
-        "POST", url,
-        fields={"token": UPSTASH_TOKEN},
+        "POST",
+        url,
         headers={"Content-Type": "application/json"},
         body=body.encode("utf-8"),
     )
