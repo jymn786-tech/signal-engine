@@ -1,15 +1,19 @@
-name: Run Signal Engine
+name: Run Signal Engine (minute loop)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '45-59 3 * * 1-5'   # 03:45–03:59 UTC  (09:15–09:29 IST)
-    - cron: '* 4-5 * * 1-5'     # 04:00–05:59 UTC  (09:30–11:29 IST)
-    - cron: '0-31 6 * * 1-5'    # 06:00–06:31 UTC  (11:30–12:01 IST)
-  
+    - cron: '45 3 * * 1-5'  # Start at 03:45 UTC (== 09:15 IST), Mon–Fri
+
+concurrency:
+  group: engine-minute-loop
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 200  # plenty for 03:45→06:31 UTC
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,26 +32,34 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      # Daily cache for dedup json (state/signals_YYYY-MM-DD.json)
-      - name: Set DAY env
-        run: echo "DAY=$(date -u +%F)" >> $GITHUB_ENV
-
-      - name: Cache daily signal state
-        uses: actions/cache@v4
-        with:
-          path: state
-          key: signals-${{ env.DAY }}-${{ github.run_id }}
-          restore-keys: |
-            signals-${{ env.DAY }}-
-
-      - name: Run engine
+      - name: Minute loop (03:45–06:31 UTC)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-          SYMBOL_LIST: ${{ secrets.SYMBOL_LIST }}
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          SYMBOL_LIST:   ${{ secrets.SYMBOL_LIST }}
+          WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
           CONTRACT_MASTER_DIR: .
-          # For testing you can set 0.002; for production, keep 0.02
+          # Tuning (optional)
           SURGE_PCT: '0.02'
         run: |
-          python signal_engine.py
+          set -e
+          echo "Starting minute loop at: $(date -u +"%F %T") UTC"
+
+          # End boundary for today in UTC (06:31:00)
+          END_TS=$(date -u -d "$(date -u +%F) 06:31:00" +%s)
+
+          while :; do
+            NOW_TS=$(date -u +%s)
+            if [ "$NOW_TS" -ge "$END_TS" ]; then
+              echo "Window over ($(date -u +"%F %T") UTC). Exiting."
+              break
+            fi
+
+            # Run once
+            python signal_engine.py || true
+
+            # Sleep to next exact minute boundary to keep cadence tight
+            SEC=$(date +%S)
+            SLEEP=$((60 - 10#$SEC))
+            sleep "$SLEEP"
+          done
