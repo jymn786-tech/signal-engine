@@ -1,18 +1,29 @@
-name: Run Signal Engine (minute loop)
+name: Signal Engine (Test Minute Loop)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '45 3 * * 1-5'  # Start at 03:45 UTC (== 09:15 IST), Mon–Fri
+    inputs:
+      end_utc:
+        description: "End time today in UTC (HH:MM:SS), e.g. 08:10:00"
+        required: false
+        default: "07:30:00"
+      surge_pct:
+        description: "Surge threshold as fraction (0.002 = 0.2%)"
+        required: false
+        default: "0.02"
+      test_date:
+        description: "Force date DD-MM-YYYY (optional, if supported in your code)"
+        required: false
+        default: ""
 
 concurrency:
-  group: engine-minute-loop
+  group: engine-minute-loop-test
   cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 200  # plenty for 03:45→06:31 UTC
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
@@ -32,34 +43,27 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      - name: Minute loop (03:45–06:31 UTC)
+      - name: Minute loop (manual test)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
           SYMBOL_LIST:   ${{ secrets.SYMBOL_LIST }}
           WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
           CONTRACT_MASTER_DIR: .
-          # Tuning (optional)
-          SURGE_PCT: '0.02'
+          SURGE_PCT:     ${{ github.event.inputs.surge_pct }}
+          END_UTC:       ${{ github.event.inputs.end_utc }}
+          TEST_DATE:     ${{ github.event.inputs.test_date }}   # only used if your script supports it
         run: |
           set -e
-          echo "Starting minute loop at: $(date -u +"%F %T") UTC"
-
-          # End boundary for today in UTC (06:31:00)
-          END_TS=$(date -u -d "$(date -u +%F) 06:31:00" +%s)
-
+          echo "Start UTC: $(date -u +"%F %T")"
+          END_UTC="${END_UTC:-07:30:00}"
+          END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$END_TS" ]; then
-              echo "Window over ($(date -u +"%F %T") UTC). Exiting."
+              echo "Test window over at $(date -u +"%F %T") UTC"
               break
             fi
-
-            # Run once
             python signal_engine.py || true
-
-            # Sleep to next exact minute boundary to keep cadence tight
-            SEC=$(date +%S)
-            SLEEP=$((60 - 10#$SEC))
-            sleep "$SLEEP"
+            SEC=$(date +%S); sleep $((60 - 10#$SEC))
           done
