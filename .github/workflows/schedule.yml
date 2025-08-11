@@ -3,7 +3,7 @@ name: Run Signal Engine
 on:
   workflow_dispatch:
   # schedule:
-  #   - cron: '*/15 3-10 * * 1-5'  # Example: every 15 mins during market hours IST
+  #   - cron: '*/15 3-10 * * 1-5'  # Every 15 mins during market hours (UTC 03–10 ≈ IST 08:30–15:30)
 
 jobs:
   run:
@@ -22,19 +22,30 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
+          else:
             pip install pya3 urllib3 pandas
           fi
 
-      - name: Run engine (uses local NSE.csv)
+      # Daily cache for dedup json (state/signals_YYYY-MM-DD.json)
+      - name: Set DAY env
+        run: echo "DAY=$(date -u +%F)" >> $GITHUB_ENV
+
+      - name: Cache daily signal state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: signals-${{ env.DAY }}-${{ github.run_id }}
+          restore-keys: |
+            signals-${{ env.DAY }}-
+
+      - name: Run engine
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
           SYMBOL_LIST: ${{ secrets.SYMBOL_LIST }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          UPSTASH_REDIS_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-          # NSE.csv is at repo root; set dir explicitly (optional)
           CONTRACT_MASTER_DIR: .
+          # For testing you can set 0.002; for production, keep 0.02
+          SURGE_PCT: '0.02'
         run: |
           python signal_engine.py
