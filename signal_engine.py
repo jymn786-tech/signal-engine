@@ -6,6 +6,7 @@ import os
 import json
 import sys
 import urllib3
+from urllib.parse import quote_plus
 from datetime import datetime, time, timezone, timedelta
 from types import SimpleNamespace
 
@@ -70,28 +71,37 @@ def load_local_masters():
 
 # ---------- Upstash helpers ----------
 def load_states(key: str) -> dict:
-    # Query param style (no body)
-    url = f"{UPSTASH_URL}/get/{key}?token={UPSTASH_TOKEN}"
+    url = f"{UPSTASH_URL}/get/{quote_plus(key)}?token={quote_plus(UPSTASH_TOKEN)}"
     r = http.request("GET", url)
-    if r.status == 200:
+    if r.status != 200:
+        print(f"⚠️ Upstash GET failed: {r.status} {r.data.decode('utf-8', 'ignore')}")
+        return {}
+    try:
         payload = json.loads(r.data.decode("utf-8"))
-        data = payload.get("result")
-        if data:
-            try:
-                return json.loads(data)
-            except json.JSONDecodeError:
-                return {}
-    return {}
+    except Exception as e:
+        print(f"⚠️ Upstash GET decode error: {e}")
+        return {}
+    val = payload.get("result")
+    if not val:
+        return {}
+    # Values are stored as a JSON string; decode to dict
+    try:
+        return json.loads(val)
+    except Exception as e:
+        print(f"⚠️ Upstash GET json parse error: {e}; raw: {val[:120]}...")
+        return {}
 
 def save_states(key: str, states: dict) -> None:
-    url = f"{UPSTASH_URL}/set/{key}?token={UPSTASH_TOKEN}"
-    body = json.dumps({"value": json.dumps(states)})
-    http.request(
-        "POST",
-        url,
-        headers={"Content-Type": "application/json"},
-        body=body.encode("utf-8"),
-    )
+    # Upstash expects the value inline in the path; encode safely
+    value = quote_plus(json.dumps(states, separators=(",", ":")))
+    url = f"{UPSTASH_URL}/set/{quote_plus(key)}/{value}?token={quote_plus(UPSTASH_TOKEN)}"
+    r = http.request("POST", url)
+    if r.status != 200:
+        print(f"⚠️ Upstash SET failed: {r.status} {r.data.decode('utf-8', 'ignore')}")
+    else:
+        # Optional: verify immediately
+        verify = load_states(key)
+        print(f"🔎 Upstash verify: {len(verify)} symbols persisted")
 
 
 # ---------- Instrument lookup (local CSV first) ----------
