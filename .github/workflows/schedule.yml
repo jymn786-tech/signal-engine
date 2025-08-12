@@ -30,25 +30,45 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      - name: Minute loop (03:45–06:31 UTC daily)
+      - name: Minute loop (manual start; auto-stop at 12:01 IST)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
           SYMBOL_LIST:   ${{ secrets.SYMBOL_LIST }}
           WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
           CONTRACT_MASTER_DIR: .
-          # Keep your production surge threshold here
           SURGE_PCT: '0.02'
+          # Start/end in UTC (IST = UTC+05:30) → 09:15 IST = 03:45 UTC; 12:01 IST = 06:31 UTC
+          START_UTC: '03:45:00'
+          END_UTC:   '06:31:00'
         run: |
           set -e
-          echo "Start UTC: $(date -u +"%F %T")"
-          END_TS=$(date -u -d "$(date -u +%F) 06:31:00" +%s)
+          echo "Started at UTC: $(date -u +"%F %T")"
+
+          START_TS=$(date -u -d "$(date -u +%F) $START_UTC" +%s)
+          END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
+
+          # If started before 09:15 IST, wait until then
+          while :; do
+            NOW_TS=$(date -u +%s)
+            if [ "$NOW_TS" -ge "$START_TS" ]; then
+              break
+            fi
+            # sleep to next full minute while waiting
+            SEC=$(date +%S); sleep $((60 - 10#$SEC))
+          done
+
+          echo "Entering minute loop at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$END_TS" ]; then
-              echo "Window over at $(date -u +"%F %T") UTC"
+              echo "Window over at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
               break
             fi
+
             python signal_engine.py || true
-            SEC=$(date +%S); sleep $((60 - 10#$SEC))
+
+            # Sleep to next exact minute boundary
+            SEC=$(date +%S)
+            sleep $((60 - 10#$SEC))
           done
