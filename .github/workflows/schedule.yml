@@ -2,8 +2,6 @@ name: Signal Engine (Prod Minute Loop)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '45 3 * * 1-5'  # Start at 03:45 UTC (== 09:15 IST), Mon–Fri
 
 concurrency:
   group: engine-minute-loop-prod
