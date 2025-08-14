@@ -30,6 +30,15 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
+      # Restore dedup state from cache
+      - name: Restore dedup cache
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: dedup-${{ github.run_id }}
+          restore-keys: |
+            dedup-
+
       - name: Minute loop (manual start; auto-stop at 12:01 IST)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
@@ -38,7 +47,6 @@ jobs:
           WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
           CONTRACT_MASTER_DIR: .
           SURGE_PCT: '0.02'
-          # Start/end in UTC (IST = UTC+05:30) → 09:15 IST = 03:45 UTC; 12:01 IST = 06:31 UTC
           START_UTC: '03:45:00'
           END_UTC:   '06:31:00'
         run: |
@@ -48,13 +56,11 @@ jobs:
           START_TS=$(date -u -d "$(date -u +%F) $START_UTC" +%s)
           END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
 
-          # If started before 09:15 IST, wait until then
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$START_TS" ]; then
               break
             fi
-            # sleep to next full minute while waiting
             SEC=$(date +%S); sleep $((60 - 10#$SEC))
           done
 
@@ -68,7 +74,9 @@ jobs:
 
             python signal_engine.py || true
 
-            # Sleep to next exact minute boundary
+            # Save dedup state to cache each loop iteration
+            tar -czf dedup_state.tar.gz state || true
+
             SEC=$(date +%S)
             sleep $((60 - 10#$SEC))
           done
