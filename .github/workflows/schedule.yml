@@ -30,12 +30,16 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      # Restore dedup state from cache
+      # Set a date-based environment variable for cache key
+      - name: Set cache date
+        run: echo "CACHE_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      # Restore dedup state based on today's date
       - name: Restore dedup cache
         uses: actions/cache@v4
         with:
           path: state
-          key: dedup-$(date +%F)
+          key: dedup-${{ env.CACHE_DATE }}
           restore-keys: |
             dedup-
 
@@ -56,6 +60,7 @@ jobs:
           START_TS=$(date -u -d "$(date -u +%F) $START_UTC" +%s)
           END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
 
+          # If started before 09:15 IST, wait until then
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$START_TS" ]; then
@@ -74,9 +79,15 @@ jobs:
 
             python signal_engine.py || true
 
-            # Save dedup state to cache each loop iteration
-            tar -czf dedup_state.tar.gz state || true
-
+            # Sleep to next exact minute boundary
             SEC=$(date +%S)
             sleep $((60 - 10#$SEC))
           done
+
+      # Save dedup state for same-day reruns
+      - name: Save dedup cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: dedup-${{ env.CACHE_DATE }}
