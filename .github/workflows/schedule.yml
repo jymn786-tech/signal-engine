@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: state
-          key: dedup-${{ github.run_id }}
+          key: dedup-$(date +%F)
           restore-keys: |
             dedup-
 
