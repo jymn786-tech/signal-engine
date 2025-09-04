@@ -1,17 +1,16 @@
-name: Signal Engine (Prod Minute Loop)
+name: Signal Engine (VWAP Minute Loop)
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: engine-minute-loop-prod
+  group: engine-minute-loop-vwap
   cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 200
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +18,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: 3.9
 
       - name: Install dependencies
         run: |
@@ -30,29 +29,25 @@ jobs:
             pip install pya3 urllib3 pandas
           fi
 
-      # Set a date-based environment variable for cache key
       - name: Set cache date
         run: echo "CACHE_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      # Restore dedup state based on today's date
       - name: Restore dedup cache
         uses: actions/cache@v4
         with:
           path: state
           key: dedup-${{ env.CACHE_DATE }}
-          restore-keys: |
-            dedup-
+          restore-keys: dedup-
 
-      - name: Minute loop (manual start; auto-stop at 12:01 IST)
+      - name: Minute loop (VWAP Engine; auto-stop at 12:01 IST)
         env:
           ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
           ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-          SYMBOL_LIST:   ${{ secrets.SYMBOL_LIST }}
-          WEBHOOK_URL:   ${{ secrets.WEBHOOK_URL }}
-          CONTRACT_MASTER_DIR: .
-          SURGE_PCT: '0.02'
-          START_UTC: '03:45:00'
-          END_UTC:   '06:31:00'
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          CONTRACT_MASTER_DIR: '.'
+          VWAP_THRESHOLD: '2.0'
+          START_UTC: '03:45:00'   # 09:15 IST
+          END_UTC: '06:31:00'     # 12:01 IST
         run: |
           set -e
           echo "Started at UTC: $(date -u +"%F %T")"
@@ -60,7 +55,7 @@ jobs:
           START_TS=$(date -u -d "$(date -u +%F) $START_UTC" +%s)
           END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
 
-          # If started before 09:15 IST, wait until then
+          # Wait until 09:15 IST if started earlier
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$START_TS" ]; then
@@ -69,7 +64,7 @@ jobs:
             SEC=$(date +%S); sleep $((60 - 10#$SEC))
           done
 
-          echo "Entering minute loop at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
+          echo "Entering VWAP engine loop at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
           while :; do
             NOW_TS=$(date -u +%s)
             if [ "$NOW_TS" -ge "$END_TS" ]; then
@@ -77,14 +72,13 @@ jobs:
               break
             fi
 
-            python signal_engine.py || true
+            python vwap_live_engine.py || true
 
             # Sleep to next exact minute boundary
             SEC=$(date +%S)
             sleep $((60 - 10#$SEC))
           done
 
-      # Save dedup state for same-day reruns
       - name: Save dedup cache
         if: always()
         uses: actions/cache/save@v4
