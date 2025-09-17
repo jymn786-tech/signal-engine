@@ -114,10 +114,8 @@ def fetch_today_ohlc(alice: Aliceblue, symbol: str):
     Logs detailed info for debugging.
     """
     try:
-        log.info(f"[FETCH] Starting fetch for {symbol}")
         instr = alice.get_instrument_by_symbol(symbol=symbol, exchange="NSE")
-        log.info(f"[FETCH] {symbol} resolved instrument: {instr}")
-
+    
         today_str = NOW().strftime("%d-%m-%Y")
         from_date = datetime.strptime(today_str, "%d-%m-%Y")
         to_date   = datetime.strptime(today_str, "%d-%m-%Y")
@@ -130,8 +128,6 @@ def fetch_today_ohlc(alice: Aliceblue, symbol: str):
         if df is None or getattr(df, "empty", True):
             log.warning(f"[FETCH] {symbol}: empty response (rate limit or bad instrument)")
             return None
-
-        log.info(f"[FETCH] {symbol}: received {len(df)} rows, first ts={df.iloc[0]['datetime']}")
         return df
 
     except Exception as e:
@@ -170,9 +166,6 @@ def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[d
             openp = float(first["open"])
             gap_pct = (openp - yclose) / yclose * 100
 
-            log.info(f"[GAPUP] {symbol}: yclose={yclose}, open={openp}, "
-                     f"gap={gap_pct:.2f}% (band={row.band}, margin={row.margin})")
-
             if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
                 log.info(f"[GAPUP] {symbol} PASSED filter")
                 gapups.append({
@@ -190,7 +183,6 @@ def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[d
 
     log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(master)} tradables")
     return gapups
-
 
 
 def allocate_and_trade(cfg: Config, gapups: List[dict]):
