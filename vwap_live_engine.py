@@ -14,6 +14,7 @@ import os, sys, math, json, time, logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import pandas as pd
+from typing import List
 import urllib3, pytz, requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pya3 import Aliceblue
