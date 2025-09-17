@@ -74,18 +74,25 @@ def load_master(cfg: Config) -> pd.DataFrame:
         from io import StringIO
         df = pd.read_csv(StringIO(r.data.decode("utf-8")))
     else:
-        raise FileNotFoundError("No master.csv found (local or GitHub)")
+        raise FileNotFoundError("No master.csv found")
 
-    # Normalize columns
+    # Normalize headers
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
     rename = {}
     for c in df.columns:
         if c in {"symbol", "stock", "tradingsymbol"}: rename[c] = "symbol"
-        if "yclose" in c or "prev" in c: rename[c] = "yclose"
+        if "close" in c: rename[c] = "yclose"
         if "band" in c: rename[c] = "band"
         if "margin" in c: rename[c] = "margin"
     df = df.rename(columns=rename)
 
+    # Handle "No Band"
+    df["band"] = df["band"].apply(
+        lambda x: 999 if str(x).strip().lower() == "no band" else x
+    )
+    df["band"] = pd.to_numeric(df["band"], errors="coerce")
+
+    # Ensure required columns
     need = {"symbol", "yclose", "band", "margin"}
     if not need.issubset(df.columns):
         raise ValueError(f"master.csv missing {need}")
@@ -93,6 +100,7 @@ def load_master(cfg: Config) -> pd.DataFrame:
     df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
     df = df[(df["band"] >= cfg.band_min) & (df["margin"] == cfg.margin_required)]
     return df[["symbol", "yclose", "band", "margin"]]
+
 
 # -------------------- AliceBlue helpers --------------------
 def alice_connect(cfg: Config) -> Aliceblue:
