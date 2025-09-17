@@ -143,47 +143,57 @@ def fetch_today_ohlc(alice: Aliceblue, symbol: str):
 # -------------------- Core logic --------------------
 def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[dict]:
     """
-    Detect gap-up stocks (2–7%) using first candle.
-    Adds detailed logging for each symbol.
+    Sequential gap-up detection with retries and logging.
+    Safer than ThreadPoolExecutor (avoids AliceBlue rate limits).
     """
     gapups = []
-    with ThreadPoolExecutor(max_workers=cfg.alice_workers) as exe:
-        futs = {exe.submit(fetch_today_ohlc, alice, row.symbol): row
-                for row in master.itertuples()}
+    for row in master.itertuples():
+        symbol = row.symbol
+        yclose = row.yclose
 
-        for fut in as_completed(futs):
-            row = futs[fut]
-            hist = fut.result()
-            if hist is None:
-                log.warning(f"[GAPUP] Skipping {row.symbol}: no data fetched")
-                continue
+        # Retry with backoff
+        hist = None
+        for attempt in range(3):
+            hist = fetch_today_ohlc(alice, symbol)
+            if hist is not None and not getattr(hist, "empty", True):
+                break
+            wait_s = 2 * (attempt + 1)
+            log.warning(f"[RETRY] {symbol} attempt {attempt+1} failed, waiting {wait_s}s")
+            time.sleep(wait_s)
 
-            try:
-                first = hist.iloc[0]
-                openp = float(first["open"])
-                yclose = row.yclose
-                gap_pct = (openp - yclose) / yclose * 100
+        if hist is None or getattr(hist, "empty", True):
+            log.error(f"[GAPUP] Skipping {symbol}: no data after retries")
+            continue
 
-                log.info(f"[GAPUP] {row.symbol}: yclose={yclose}, open={openp}, "
-                         f"gap={gap_pct:.2f}%")
+        try:
+            first = hist.iloc[0]
+            openp = float(first["open"])
+            gap_pct = (openp - yclose) / yclose * 100
 
-                if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
-                    log.info(f"[GAPUP] {row.symbol} PASSED filter (gap {gap_pct:.2f}%)")
-                    gapups.append({
-                        "symbol": row.symbol,
-                        "yclose": yclose,
-                        "open": openp,
-                        "gap_pct": gap_pct,
-                        "margin": row.margin,
-                    })
-                else:
-                    log.info(f"[GAPUP] {row.symbol} FAILED filter (gap {gap_pct:.2f}%)")
+            log.info(f"[GAPUP] {symbol}: yclose={yclose}, open={openp}, "
+                     f"gap={gap_pct:.2f}% (band={row.band}, margin={row.margin})")
 
-            except Exception as e:
-                log.error(f"[GAPUP] Error analyzing {row.symbol}: {e}")
+            if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
+                log.info(f"[GAPUP] {symbol} PASSED filter")
+                gapups.append({
+                    "symbol": symbol,
+                    "yclose": yclose,
+                    "open": openp,
+                    "gap_pct": gap_pct,
+                    "margin": row.margin,
+                })
+            else:
+                log.info(f"[GAPUP] {symbol} FAILED filter")
 
-    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups")
+        except Exception as e:
+            log.error(f"[GAPUP] Error analyzing {symbol}: {e}")
+
+        # Small pause between requests (avoid API bursts)
+        time.sleep(0.3)
+
+    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(master)} tradables")
     return gapups
+
 
 
 def allocate_and_trade(cfg: Config, gapups: List[dict]):
