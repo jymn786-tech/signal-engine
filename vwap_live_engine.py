@@ -109,17 +109,35 @@ def alice_connect(cfg: Config) -> Aliceblue:
     return alice
 
 def fetch_today_ohlc(alice: Aliceblue, symbol: str):
+    """
+    Fetch today's 1-minute OHLCV for a given NSE symbol.
+    Uses positional arguments for get_historical (same as your VWAP script).
+    """
     try:
         instr = alice.get_instrument_by_symbol(symbol=symbol, exchange="NSE")
-        today = NOW().strftime("%d-%m-%Y")
-        df = alice.get_historical(instr, from_date=today, to_date=today,
-                                  interval="1", indices=False)
-        if isinstance(df, dict) and "error" in df: return None
-        if df is None or df.empty: return None
+
+        # Today’s date as datetime
+        today_str = NOW().strftime("%d-%m-%Y")
+        from_date = datetime.strptime(today_str, "%d-%m-%Y")
+        to_date   = datetime.strptime(today_str, "%d-%m-%Y")
+
+        # Call in positional style (no keyword args!)
+        df = alice.get_historical(instr, from_date, to_date, "1", indices=False)
+
+        # Handle error conditions
+        if isinstance(df, dict) and "error" in df:
+            log.error(f"{symbol}: {df['error']}")
+            return None
+        if df is None or getattr(df, "empty", True):
+            log.warning(f"{symbol}: no data returned")
+            return None
+
         return df
+
     except Exception as e:
         log.error(f"Fetch fail {symbol}: {e}")
         return None
+
 
 # -------------------- Core logic --------------------
 def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[dict]:
