@@ -111,51 +111,64 @@ def alice_connect(cfg: Config) -> Aliceblue:
 def fetch_today_ohlc(alice: Aliceblue, symbol: str):
     """
     Fetch today's 1-minute OHLCV for a given NSE symbol.
-    Uses positional arguments for get_historical (same as your VWAP script).
+    Logs detailed info for debugging.
     """
     try:
+        log.info(f"[FETCH] Starting fetch for {symbol}")
         instr = alice.get_instrument_by_symbol(symbol=symbol, exchange="NSE")
+        log.info(f"[FETCH] {symbol} resolved instrument: {instr}")
 
-        # Today’s date as datetime
         today_str = NOW().strftime("%d-%m-%Y")
         from_date = datetime.strptime(today_str, "%d-%m-%Y")
         to_date   = datetime.strptime(today_str, "%d-%m-%Y")
 
-        # Call in positional style (no keyword args!)
         df = alice.get_historical(instr, from_date, to_date, "1", indices=False)
 
-        # Handle error conditions
         if isinstance(df, dict) and "error" in df:
-            log.error(f"{symbol}: {df['error']}")
+            log.error(f"[FETCH] {symbol} error: {df['error']}")
             return None
         if df is None or getattr(df, "empty", True):
-            log.warning(f"{symbol}: no data returned")
+            log.warning(f"[FETCH] {symbol}: empty response (rate limit or bad instrument)")
             return None
 
+        log.info(f"[FETCH] {symbol}: received {len(df)} rows, first ts={df.iloc[0]['datetime']}")
         return df
-        time.sleep(0.2)  # 200 ms between requests
 
     except Exception as e:
-        log.error(f"Fetch fail {symbol}: {e}")
+        log.error(f"[FETCH] {symbol} failed: {e}")
         return None
+
 
 
 # -------------------- Core logic --------------------
 def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[dict]:
+    """
+    Detect gap-up stocks (2–7%) using first candle.
+    Adds detailed logging for each symbol.
+    """
     gapups = []
     with ThreadPoolExecutor(max_workers=cfg.alice_workers) as exe:
         futs = {exe.submit(fetch_today_ohlc, alice, row.symbol): row
                 for row in master.itertuples()}
+
         for fut in as_completed(futs):
             row = futs[fut]
             hist = fut.result()
-            if hist is None: continue
+            if hist is None:
+                log.warning(f"[GAPUP] Skipping {row.symbol}: no data fetched")
+                continue
+
             try:
-                first_candle = hist.iloc[0]
-                openp = float(first_candle["open"])
+                first = hist.iloc[0]
+                openp = float(first["open"])
                 yclose = row.yclose
                 gap_pct = (openp - yclose) / yclose * 100
+
+                log.info(f"[GAPUP] {row.symbol}: yclose={yclose}, open={openp}, "
+                         f"gap={gap_pct:.2f}%")
+
                 if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
+                    log.info(f"[GAPUP] {row.symbol} PASSED filter (gap {gap_pct:.2f}%)")
                     gapups.append({
                         "symbol": row.symbol,
                         "yclose": yclose,
@@ -163,9 +176,15 @@ def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[d
                         "gap_pct": gap_pct,
                         "margin": row.margin,
                     })
+                else:
+                    log.info(f"[GAPUP] {row.symbol} FAILED filter (gap {gap_pct:.2f}%)")
+
             except Exception as e:
-                log.error(f"Error analyzing {row.symbol}: {e}")
+                log.error(f"[GAPUP] Error analyzing {row.symbol}: {e}")
+
+    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups")
     return gapups
+
 
 def allocate_and_trade(cfg: Config, gapups: List[dict]):
     if not gapups:
