@@ -133,6 +133,7 @@ def fetch_today_ohlc(alice: Aliceblue, symbol: str):
             return None
 
         return df
+        time.sleep(0.2)  # 200 ms between requests
 
     except Exception as e:
         log.error(f"Fetch fail {symbol}: {e}")
