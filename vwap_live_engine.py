@@ -188,9 +188,6 @@ def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[d
         except Exception as e:
             log.error(f"[GAPUP] Error analyzing {symbol}: {e}")
 
-        # Small pause between requests (avoid API bursts)
-        time.sleep(0.3)
-
     log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(master)} tradables")
     return gapups
 
