@@ -30,7 +30,6 @@ log = logging.getLogger("gap_fade")
 IST = pytz.timezone("Asia/Kolkata")
 NOW = lambda: datetime.now(IST)
 MARKET_OPEN = lambda: NOW().replace(hour=9, minute=15, second=0, microsecond=0)
-LAST_ENTRY_MINUTE = lambda: MARKET_OPEN() + timedelta(minutes=10)
 
 # -------------------- Config --------------------
 @dataclass
@@ -47,8 +46,6 @@ class Config:
     margin_required: float = float(os.getenv("MARGIN_REQUIRED", 5))
     gap_min_pct: float = float(os.getenv("GAP_MIN_PCT", 2.0))
     gap_max_pct: float = float(os.getenv("GAP_MAX_PCT", 7.0))
-
-    alice_workers: int = int(os.getenv("ALICE_WORKERS", 12))
 
     algomojo_url: str = os.getenv("ALGOMOJO_URL", "")
     algomojo_api_key: str = os.getenv("ALGOMOJO_API_KEY", "")
@@ -101,6 +98,16 @@ def load_master(cfg: Config) -> pd.DataFrame:
     df = df[(df["band"] >= cfg.band_min) & (df["margin"] == cfg.margin_required)]
     return df[["symbol", "yclose", "band", "margin"]]
 
+# -------------------- Contract Master --------------------
+def load_contract_master(alice: Aliceblue) -> dict:
+    log.info("Loading contract master (this may take a while)…")
+    instruments = alice.get_instruments()
+    symbol_map = {}
+    for inst in instruments:
+        if inst["exch_seg"] == "NSE" and inst["instrumenttype"] == "EQ":
+            symbol_map[inst["symbol"].upper()] = inst
+    log.info(f"Contract master loaded: {len(symbol_map)} NSE-EQ instruments")
+    return symbol_map
 
 # -------------------- AliceBlue helpers --------------------
 def alice_connect(cfg: Config) -> Aliceblue:
@@ -108,83 +115,88 @@ def alice_connect(cfg: Config) -> Aliceblue:
     _ = alice.get_session_id()
     return alice
 
-def fetch_today_ohlc(alice: Aliceblue, symbol: str):
-    """
-    Fetch today's 1-minute OHLCV for a given NSE symbol.
-    Logs detailed info for debugging.
-    """
-    try:
-        instr = alice.get_instrument_by_symbol(symbol=symbol, exchange="NSE")
-    
-        today_str = NOW().strftime("%d-%m-%Y")
-        from_date = datetime.strptime(today_str, "%d-%m-%Y")
-        to_date   = datetime.strptime(today_str, "%d-%m-%Y")
-
-        df = alice.get_historical(instr, from_date, to_date, "1", indices=False)
-
-        if isinstance(df, dict) and "error" in df:
-            log.error(f"[FETCH] {symbol} error: {df['error']}")
-            return None
-        if df is None or getattr(df, "empty", True):
-            log.warning(f"[FETCH] {symbol}: empty response (rate limit or bad instrument)")
-            return None
-        return df
-
-    except Exception as e:
-        log.error(f"[FETCH] {symbol} failed: {e}")
+def fetch_today_ohlc(alice: Aliceblue, symbol: str, inst_map: dict, retries: int = 3):
+    instr = inst_map.get(symbol.upper())
+    if not instr:
+        log.error(f"[FETCH] {symbol} not found in contract master")
         return None
 
+    today_str = NOW().strftime("%d-%m-%Y")
+    from_date = datetime.strptime(today_str, "%d-%m-%Y")
+    to_date   = datetime.strptime(today_str, "%d-%m-%Y")
 
-
-# -------------------- Core logic --------------------
-def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame) -> List[dict]:
-    """
-    Sequential gap-up detection with retries and logging.
-    Safer than ThreadPoolExecutor (avoids AliceBlue rate limits).
-    """
-    gapups = []
-    for row in master.itertuples():
-        symbol = row.symbol
-        yclose = row.yclose
-
-        # Retry with backoff
-        hist = None
-        for attempt in range(3):
-            hist = fetch_today_ohlc(alice, symbol)
-            if hist is not None and not getattr(hist, "empty", True):
-                break
-            wait_s = 2 * (attempt + 1)
-            log.warning(f"[RETRY] {symbol} attempt {attempt+1} failed, waiting {wait_s}s")
-            time.sleep(wait_s)
-
-        if hist is None or getattr(hist, "empty", True):
-            log.error(f"[GAPUP] Skipping {symbol}: no data after retries")
-            continue
-
+    for attempt in range(retries):
         try:
-            first = hist.iloc[0]
-            openp = float(first["open"])
-            gap_pct = (openp - yclose) / yclose * 100
-
-            if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
-                log.info(f"[GAPUP] {symbol} PASSED filter")
-                gapups.append({
-                    "symbol": symbol,
-                    "yclose": yclose,
-                    "open": openp,
-                    "gap_pct": gap_pct,
-                    "margin": row.margin,
-                })
-            else:
-                log.info(f"[GAPUP] {symbol} FAILED filter")
-
+            df = alice.get_historical(instr, from_date, to_date, "1", indices=False)
+            if df is not None and not getattr(df, "empty", True):
+                first_ts = df.iloc[0]['datetime'] if not df.empty else "N/A"
+                log.info(f"[FETCH] {symbol}: got {len(df)} rows, first ts={first_ts}")
+                return df
         except Exception as e:
-            log.error(f"[GAPUP] Error analyzing {symbol}: {e}")
+            log.warning(f"[FETCH] {symbol} attempt {attempt+1} failed: {e}")
 
-    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(master)} tradables")
+        wait_s = 2 * (attempt + 1)
+        log.warning(f"[FETCH] {symbol}: retrying in {wait_s}s")
+        time.sleep(wait_s)
+
+    log.error(f"[FETCH] {symbol}: no data after {retries} retries")
+    return None
+
+# -------------------- Analysis --------------------
+def analyze_first_candle(hist: pd.DataFrame, master: pd.DataFrame, symbol: str, cfg: Config):
+    try:
+        first = hist.iloc[0]
+        openp = float(first["open"])
+        yclose = float(master.loc[master["symbol"] == symbol, "yclose"].values[0])
+        gap_pct = (openp - yclose) / yclose * 100
+
+        log.info(f"[ANALYZE] {symbol}: yclose={yclose}, open={openp}, gap={gap_pct:.2f}%")
+
+        if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
+            log.info(f"[ANALYZE] {symbol} PASSED gap filter")
+            return {
+                "symbol": symbol,
+                "yclose": yclose,
+                "open": openp,
+                "gap_pct": gap_pct,
+                "margin": float(master.loc[master["symbol"] == symbol, "margin"].values[0]),
+            }
+        else:
+            log.info(f"[ANALYZE] {symbol} FAILED gap filter")
+            return None
+    except Exception as e:
+        log.error(f"[ANALYZE] {symbol} failed: {e}")
+        return None
+
+# -------------------- Gap-up Detector --------------------
+def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame, inst_map: dict, first_run=True) -> List[dict]:
+    gapups = []
+    symbols = master["symbol"].tolist()
+
+    if first_run:
+        log.info("[GAPUP] First run: using small threadpool for speed")
+        with ThreadPoolExecutor(max_workers=3) as exe:
+            futs = {exe.submit(fetch_today_ohlc, alice, sym, inst_map): sym for sym in symbols}
+            for fut in as_completed(futs):
+                symbol = futs[fut]
+                hist = fut.result()
+                if hist is None: 
+                    continue
+                gap = analyze_first_candle(hist, master, symbol, cfg)
+                if gap: gapups.append(gap)
+    else:
+        log.info("[GAPUP] Subsequent run: sequential fetch (gap-up candidates only)")
+        for symbol in symbols:
+            hist = fetch_today_ohlc(alice, symbol, inst_map)
+            if hist is None: 
+                continue
+            gap = analyze_first_candle(hist, master, symbol, cfg)
+            if gap: gapups.append(gap)
+
+    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(symbols)} checked")
     return gapups
 
-
+# -------------------- Trading --------------------
 def allocate_and_trade(cfg: Config, gapups: List[dict]):
     if not gapups:
         log.info("No gap-ups found today.")
@@ -205,7 +217,6 @@ def allocate_and_trade(cfg: Config, gapups: List[dict]):
                 time.sleep(max(0, sleep_s))
             place_order(cfg, g["symbol"], tranche)
 
-# -------------------- Order sending --------------------
 def place_order(cfg: Config, symbol: str, qty: int):
     payload = {
         "symbol": symbol,
@@ -246,8 +257,13 @@ def main():
 
     master = load_master(cfg)
     alice = alice_connect(cfg)
-    gapups = detect_gapups(cfg, alice, master)
+    inst_map = load_contract_master(alice)
+
+    # First run at 09:16
+    gapups = detect_gapups(cfg, alice, master, inst_map, first_run=True)
     allocate_and_trade(cfg, gapups)
+
+    # Later runs could call detect_gapups(..., first_run=False) if needed
 
 if __name__ == "__main__":
     main()
