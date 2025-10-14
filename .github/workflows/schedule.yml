@@ -1,87 +1,63 @@
-name: Signal Engine (VWAP Minute Loop)
+name: NIFTY Trend-Chain (Algomojo)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+  schedule:
+    # 11:30 IST = 06:00 UTC, Mon–Fri
+    - cron: "0 6 * * 1-5"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: engine-minute-loop-vwap
-  cancel-in-progress: true
+  group: nifty-trend-chain
+  cancel-in-progress: false
 
 jobs:
-  run:
+  run-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 360  # script may run until around 15:15 IST (~09:45 UTC)
+
+    env:
+      # --- Required ENV for your script ---
+      ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
+      ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
+
+      # Spot index name in AliceBlue (adjust if your broker uses a different string)
+      NIFTY_SYMBOL_SPOT: "NIFTY 50"
+
+      # Algomojo webhook (your provided URL)
+      ALGOMOJO_WEBHOOK_URL: ${{ secrets.ALGOMOJO_WEBHOOK_URL }}
+
+      # Optional: change alert names if your Algomojo strategy expects different strings
+      BUY_ALERT_NAME: "BUY"
+      SELL_ALERT_NAME: "SELL"
+
+      # Set 0 to actually hit Algomojo; 1 for dry-run
+      DRY_RUN: "0"
+
+      # Polling cadence while waiting for slots
+      POLL_SEC: "5"
+
+      # Force runner timezone for logs (script uses Asia/Kolkata internally via pytz)
+      TZ: "Asia/Kolkata"
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repo
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.9
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pya3 urllib3 pandas
-          fi
+          # If you have a requirements.txt, prefer: pip install -r requirements.txt
+          pip install pandas pytz requests pya3
 
-      - name: Set cache date
-        run: echo "CACHE_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-
-      - name: Restore dedup cache
-        uses: actions/cache@v4
-        with:
-          path: state
-          key: dedup-${{ env.CACHE_DATE }}
-          restore-keys: dedup-
-
-      - name: Minute loop (VWAP Engine; auto-stop at 12:01 IST)
-        env:
-          ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
-          ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          CONTRACT_MASTER_DIR: '.'
-          VWAP_THRESHOLD: '2.0'
-          START_UTC: '03:45:00'   # 09:15 IST
-          END_UTC: '09:31:00'     # 15:01 IST
+      - name: Run NIFTY trend-chain engine
         run: |
-          set -e
-          echo "Started at UTC: $(date -u +"%F %T")"
-
-          START_TS=$(date -u -d "$(date -u +%F) $START_UTC" +%s)
-          END_TS=$(date -u -d "$(date -u +%F) $END_UTC" +%s)
-
-          # Wait until 09:15 IST if started earlier
-          while :; do
-            NOW_TS=$(date -u +%s)
-            if [ "$NOW_TS" -ge "$START_TS" ]; then
-              break
-            fi
-            SEC=$(date +%S); sleep $((60 - 10#$SEC))
-          done
-
-          echo "Entering VWAP engine loop at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
-          while :; do
-            NOW_TS=$(date -u +%s)
-            if [ "$NOW_TS" -ge "$END_TS" ]; then
-              echo "Window over at UTC: $(date -u +"%F %T") (IST $(TZ=Asia/Kolkata date +"%T"))"
-              break
-            fi
-
-            python vwap_live_engine.py || true
-
-            # Sleep to next exact minute boundary
-            SEC=$(date +%S)
-            sleep $((60 - 10#$SEC))
-          done
-
-      - name: Save dedup cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: state
-          key: dedup-${{ env.CACHE_DATE }}
+          python -u nifty_trend_chain.py
