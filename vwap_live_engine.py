@@ -1,258 +1,231 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Gap-Up Fade Engine (AliceBlue pya3 → Algomojo)
-----------------------------------------------
+NIFTY Trend-Chain Engine → Algomojo Webhook
+-------------------------------------------
 
-- Loads master.csv from repo (fallback: GITHUB_MASTER_CSV_URL)
-- At 09:16 IST: fetches today’s 1-min OHLCV for Tradables
-- Detects gap-up (2–7%) using YesterdayClose
-- Allocates TOTAL_CAPITAL equally across gap-ups
-- Places SELL MARKET tranches each minute (09:16–09:25)
+- Start/launch any time; will wait until 11:30 IST for first evaluation
+- 1-min NIFTY spot data (no look-ahead)
+- Entry slots: 11:30, 12:00, 12:30, 13:00, 13:30, 14:00 IST
+- Enter only if BOTH:
+    * Full-day trend (10:00→T-1) and
+    * Last-hour trend (T-61→T-1)
+  have the SAME sign.
+- Base hold = 60 min; at next slot, if same direction & valid, extend exit by +30 (so T→T+60→T+90…)
+- Exit on flip/invalid/missing, or if a full hour cannot be held within session (cutoff 15:15)
+- Orders via Algomojo webhook: alert_name = "BUY" / "SELL"
 """
 
-import os, sys, math, json, time, logging
+import os, sys, time, logging, pytz, requests
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Optional
 import pandas as pd
-from typing import List
-import urllib3, pytz, requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pya3 import Aliceblue
 
 # -------------------- Logging --------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-log = logging.getLogger("gap_fade")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("nifty_trend_chain")
 
 # -------------------- Time helpers --------------------
 IST = pytz.timezone("Asia/Kolkata")
-NOW = lambda: datetime.now(IST)
-MARKET_OPEN = lambda: NOW().replace(hour=9, minute=15, second=0, microsecond=0)
+def NOW(): return datetime.now(IST).replace(second=0, microsecond=0)
+def AT(h, m):
+    n = NOW()
+    return n.replace(hour=h, minute=m, second=0, microsecond=0)
+
+MARKET_OPEN  = lambda: AT(10, 0)
+MARKET_CLOSE = lambda: AT(15, 15)
+
+EVAL_SLOTS = [AT(11,30), AT(12,0), AT(12,30), AT(13,0), AT(13,30), AT(14,0)]
 
 # -------------------- Config --------------------
 @dataclass
 class Config:
+    # AliceBlue
     alice_user_id: str = os.getenv("ALICE_USER_ID", "")
     alice_api_key: str = os.getenv("ALICE_API_KEY", "")
 
-    master_local_path: str = os.getenv("MASTER_LOCAL_PATH", "master.csv")
-    github_master_csv_url: str = os.getenv("GITHUB_MASTER_CSV_URL", "")
+    # Data symbol (spot index name in AliceBlue; adjust if needed)
+    nifty_symbol_spot: str = os.getenv("NIFTY_SYMBOL_SPOT", "NIFTY 50")
 
-    total_capital: float = float(os.getenv("TOTAL_CAPITAL", 100000))
-    tranche_count: int = int(os.getenv("TRANCHE_COUNT", 10))
-    band_min: float = float(os.getenv("BAND_MIN", 10))
-    margin_required: float = float(os.getenv("MARGIN_REQUIRED", 5))
-    gap_min_pct: float = float(os.getenv("GAP_MIN_PCT", 2.0))
-    gap_max_pct: float = float(os.getenv("GAP_MAX_PCT", 7.0))
-
-    alice_workers: int = int(os.getenv("ALICE_WORKERS", 3))
-
-    algomojo_url: str = os.getenv("ALGOMOJO_URL", "")
-    algomojo_api_key: str = os.getenv("ALGOMOJO_API_KEY", "")
-    algomojo_secret: str = os.getenv("ALGOMOJO_SECRET", "")
-    algomojo_broker: str = os.getenv("ALGOMOJO_BROKER", "AB")
-    webhook_url: str = os.getenv("WEBHOOK_URL", "")
-
-    dry_run: bool = bool(int(os.getenv("DRY_RUN", "1")))
-
-http = urllib3.PoolManager()
-
-# -------------------- Load master.csv --------------------
-def load_master(cfg: Config) -> pd.DataFrame:
-    if os.path.isfile(cfg.master_local_path):
-        log.info(f"Loading master.csv locally ({cfg.master_local_path})")
-        df = pd.read_csv(cfg.master_local_path)
-    elif cfg.github_master_csv_url:
-        log.info("Local master.csv not found. Fetching from GitHub…")
-        r = http.request("GET", cfg.github_master_csv_url,
-                         timeout=urllib3.Timeout(connect=3, read=5))
-        if r.status != 200:
-            raise RuntimeError(f"Master fetch failed: HTTP {r.status}")
-        from io import StringIO
-        df = pd.read_csv(StringIO(r.data.decode("utf-8")))
-    else:
-        raise FileNotFoundError("No master.csv found")
-
-    # Normalize headers
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    rename = {}
-    for c in df.columns:
-        if c in {"symbol", "stock", "tradingsymbol"}: rename[c] = "symbol"
-        if "close" in c: rename[c] = "yclose"
-        if "band" in c: rename[c] = "band"
-        if "margin" in c: rename[c] = "margin"
-    df = df.rename(columns=rename)
-
-    # Handle "No Band"
-    df["band"] = df["band"].apply(
-        lambda x: 999 if str(x).strip().lower() == "no band" else x
+    # Algomojo webhook
+    algomojo_webhook_url: str = os.getenv(
+        "ALGOMOJO_WEBHOOK_URL",
+        "https://amapi.algomojo.com/v1/webhook/ze/5835bced68e0c22a4843cc9d3c211a68/23acc0b718e2c1e9cf6c33227e952519/YG5674_ZE_36/PlaceStrategyOrder"
     )
-    df["band"] = pd.to_numeric(df["band"], errors="coerce")
+    buy_alert_name: str = os.getenv("BUY_ALERT_NAME", "BUY")
+    sell_alert_name: str = os.getenv("SELL_ALERT_NAME", "SELL")
 
-    # Ensure required columns
-    need = {"symbol", "yclose", "band", "margin"}
-    if not need.issubset(df.columns):
-        raise ValueError(f"master.csv missing {need}")
+    # Behavior
+    dry_run: bool = bool(int(os.getenv("DRY_RUN", "1")))
+    poll_sec: int = int(os.getenv("POLL_SEC", "5"))
 
-    df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
-    df = df[(df["band"] >= cfg.band_min) & (df["margin"] == cfg.margin_required)]
-    return df[["symbol", "yclose", "band", "margin"]]
-
-# -------------------- AliceBlue helpers --------------------
+# -------------------- Broker/Data helpers --------------------
 def alice_connect(cfg: Config) -> Aliceblue:
+    if not cfg.alice_user_id or not cfg.alice_api_key:
+        log.error("Missing ALICE_USER_ID / ALICE_API_KEY")
+        sys.exit(1)
     alice = Aliceblue(user_id=cfg.alice_user_id, api_key=cfg.alice_api_key)
     _ = alice.get_session_id()
     return alice
 
-def fetch_today_ohlc(alice: Aliceblue, symbol: str, retries: int = 3):
-    try:
-        instr = alice.get_instrument_by_symbol(exchange="NSE", symbol=symbol)
-    except Exception as e:
-        log.error(f"[FETCH] {symbol}: instrument lookup failed: {e}")
-        return None
+def fetch_today_1min_nifty(alice: Aliceblue, cfg: Config) -> pd.DataFrame:
+    instr = alice.get_instrument_by_symbol(exchange="NSE", symbol=cfg.nifty_symbol_spot)
+    today = NOW().strftime("%d-%m-%Y")
+    from_dt = datetime.strptime(today, "%d-%m-%Y")
+    to_dt   = datetime.strptime(today, "%d-%m-%Y")
+    df = alice.get_historical(instr, from_dt, to_dt, "1", indices=True)
+    if df is None or getattr(df, "empty", True):
+        raise RuntimeError("No NIFTY spot data received")
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(IST, nonexistent='NaT', ambiguous='NaT')
+    df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+    df = df.loc[(df.index >= MARKET_OPEN()) & (df.index <= MARKET_CLOSE())]
+    return df[["open","high","low","close","volume"]]
 
-    today_str = NOW().strftime("%d-%m-%Y")
-    from_date = datetime.strptime(today_str, "%d-%m-%Y")
-    to_date   = datetime.strptime(today_str, "%d-%m-%Y")
-
-    for attempt in range(retries):
-        try:
-            df = alice.get_historical(instr, from_date, to_date, "1", indices=False)
-            if df is not None and not getattr(df, "empty", True):
-                first_ts = df.iloc[0]['datetime'] if not df.empty else "N/A"
-                log.info(f"[FETCH] {symbol}: got {len(df)} rows, first ts={first_ts}")
-                return df
-        except Exception as e:
-            log.warning(f"[FETCH] {symbol} attempt {attempt+1} failed: {e}")
-
-        wait_s = 2 * (attempt + 1)
-        log.warning(f"[FETCH] {symbol}: retrying in {wait_s}s")
-        time.sleep(wait_s)
-
-    log.error(f"[FETCH] {symbol}: no data after {retries} retries")
-    return None
-
-# -------------------- Gap detection --------------------
-def analyze_first_candle(hist: pd.DataFrame, master: pd.DataFrame, symbol: str, cfg: Config):
-    try:
-        first = hist.iloc[0]
-        openp = float(first["open"])
-        yclose = float(master.loc[master["symbol"] == symbol, "yclose"].values[0])
-        gap_pct = (openp - yclose) / yclose * 100
-
-        log.info(f"[ANALYZE] {symbol}: yclose={yclose}, open={openp}, gap={gap_pct:.2f}%")
-
-        if cfg.gap_min_pct <= gap_pct <= cfg.gap_max_pct:
-            log.info(f"[ANALYZE] {symbol} PASSED gap filter")
-            return {
-                "symbol": symbol,
-                "yclose": yclose,
-                "open": openp,
-                "gap_pct": gap_pct,
-                "margin": float(master.loc[master["symbol"] == symbol, "margin"].values[0]),
-            }
-        else:
-            log.info(f"[ANALYZE] {symbol} FAILED gap filter")
-            return None
-    except Exception as e:
-        log.error(f"[ANALYZE] {symbol} failed: {e}")
-        return None
-
-def detect_gapups(cfg: Config, alice: Aliceblue, master: pd.DataFrame, first_run=True) -> List[dict]:
-    gapups = []
-    symbols = master["symbol"].tolist()
-
-    if first_run:
-        log.info("[GAPUP] First run: using small threadpool for speed")
-        with ThreadPoolExecutor(max_workers=cfg.alice_workers) as exe:
-            futs = {exe.submit(fetch_today_ohlc, alice, sym): sym for sym in symbols}
-            for fut in as_completed(futs):
-                symbol = futs[fut]
-                hist = fut.result()
-                if hist is None:
-                    continue
-                gap = analyze_first_candle(hist, master, symbol, cfg)
-                if gap: gapups.append(gap)
-    else:
-        log.info("[GAPUP] Subsequent run: sequential fetch (gap-up candidates only)")
-        for symbol in symbols:
-            hist = fetch_today_ohlc(alice, symbol)
-            if hist is None:
-                continue
-            gap = analyze_first_candle(hist, master, symbol, cfg)
-            if gap: gapups.append(gap)
-
-    log.info(f"[SUMMARY] Found {len(gapups)} gap-ups out of {len(symbols)} checked")
-    return gapups
-
-# -------------------- Trading --------------------
-def allocate_and_trade(cfg: Config, gapups: List[dict]):
-    if not gapups:
-        log.info("No gap-ups found today.")
-        return
-
-    cap_per = cfg.total_capital / len(gapups)
-    for g in gapups:
-        exit_qty = math.floor((cap_per * g["margin"]) / g["open"])
-        if exit_qty <= 0: continue
-        tranche = max(1, round(exit_qty / cfg.tranche_count))
-        log.info(f"{g['symbol']}: gap {g['gap_pct']:.2f}% | exit={exit_qty} | tranche={tranche}")
-
-        # Fire tranches (09:16–09:25)
-        for i in range(cfg.tranche_count):
-            place_order(cfg, g["symbol"], tranche)
-            time.sleep(1)  # avoid hammering Algomojo too fast
-
-def place_order(cfg: Config, symbol: str, qty: int):
+# -------------------- Algomojo webhook --------------------
+def send_algomojo_signal(cfg: Config, side: str):
+    """
+    side: "BUY" or "SELL"
+    Sends your exact webhook payload format with alert_name and webhook_url.
+    """
+    alert = cfg.buy_alert_name if side.upper() == "BUY" else cfg.sell_alert_name
     payload = {
-        "symbol": symbol,
-        "qty": qty,
-        "side": "SELL",
-        "type": "MARKET",
-        "product": "MIS",
-        "broker": cfg.algomojo_broker,
-        "api_key": cfg.algomojo_api_key,
-        "secret": cfg.algomojo_secret,
+        "alert_name": alert,
+        "webhook_url": cfg.algomojo_webhook_url
     }
     if cfg.dry_run:
-        log.info(f"[DRY] Order {payload}")
+        log.info(f"[DRY] Algomojo {side} → {payload}")
         return
 
     try:
-        if cfg.algomojo_url:
-            r = requests.post(cfg.algomojo_url, json=payload, timeout=5)
-            log.info(f"Order {symbol} resp {r.status_code}")
-        elif cfg.webhook_url:
-            r = requests.post(cfg.webhook_url, json=payload, timeout=5)
-            log.info(f"Webhook {symbol} resp {r.status_code}")
+        r = requests.post(cfg.algomojo_webhook_url, json=payload, timeout=10)
+        if r.status_code == 200:
+            log.info(f"📤 Sent {side} signal to Algomojo")
         else:
-            log.warning("No Algomojo or webhook URL set.")
+            log.warning(f"⚠️ Algomojo signal failed. Status={r.status_code} Body={r.text[:200]}")
     except Exception as e:
-        log.error(f"Order send fail {symbol}: {e}")
+        log.error(f"❌ Error sending signal: {e}")
+
+# -------------------- Strategy core --------------------
+def sign(x: float) -> int:
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+def compute_direction(df: pd.DataFrame, eval_time) -> int:
+    """
+    Direction at slot T based on BOTH:
+      - Full-day trend: Close(T-1) - Open(10:00)
+      - Last-hour trend: Close(T-1) - Close(T-61)
+    Return +1 (LONG) / -1 (SHORT) / 0 (SKIP) only if BOTH agree.
+    """
+    df_before = df.loc[df.index < eval_time]
+    if df_before.empty:
+        return 0
+
+    # Need 10:00 open and T-1 close
+    try:
+        day_open = float(df_before.loc[df_before.index >= MARKET_OPEN()].iloc[0]["open"])
+    except Exception:
+        return 0
+
+    last_close = float(df_before.iloc[-1]["close"])
+
+    # Need full last 60 bars before T
+    if len(df_before) < 61:
+        return 0
+    hour_start_close = float(df_before.iloc[-60]["close"])  # close at T-61
+
+    day_tr = sign(last_close - day_open)
+    hour_tr = sign(last_close - hour_start_close)
+
+    if day_tr == 0 or hour_tr == 0:
+        return 0
+    return day_tr if day_tr == hour_tr else 0
+
+def can_hold_full_hour(start_time) -> bool:
+    return (start_time + timedelta(minutes=60)) <= MARKET_CLOSE()
+
+class Position:
+    def __init__(self, direction: int, entry_time, exit_time):
+        self.direction = direction  # +1 long, -1 short
+        self.entry_time = entry_time
+        self.exit_time = exit_time
+    def __repr__(self):
+        return f"<Pos {'LONG' if self.direction==1 else 'SHORT'} {self.entry_time.time()}→{self.exit_time.time()}>"
+
+def direction_to_side(direction: int) -> str:
+    return "BUY" if direction == 1 else "SELL"
+
+def opposite(side: str) -> str:
+    return "SELL" if side == "BUY" else "BUY"
+
+# -------------------- Orchestration --------------------
+def wait_until(ts, poll_sec: int):
+    while NOW() < ts:
+        time.sleep(poll_sec)
+
+def run_trend_chain(alice: Aliceblue, cfg: Config):
+    first_slot = EVAL_SLOTS[0]
+    if NOW() < first_slot:
+        log.info(f"Waiting until first evaluation slot {first_slot.time()} IST…")
+        wait_until(first_slot, cfg.poll_sec)
+
+    active: Optional[Position] = None
+
+    for slot in EVAL_SLOTS:
+        if not can_hold_full_hour(slot):
+            log.info(f"[{slot.time()}] Skip: cannot hold a full hour (past 15:15 cutoff).")
+            continue
+
+        if NOW() < slot:
+            wait_until(slot, cfg.poll_sec)
+
+        df = fetch_today_1min_nifty(alice, cfg)
+        direction = compute_direction(df, slot)  # +1, -1, 0
+
+        # 1) Extension decision (if active exit equals slot+30, check whether to extend to slot+60)
+        if active is not None and active.exit_time == (slot + timedelta(minutes=30)):
+            if direction != 0 and direction == active.direction and can_hold_full_hour(slot):
+                new_exit = slot + timedelta(minutes=60)   # extend by +30 net (T→T+90 after first extension)
+                log.info(f"[{slot.time()}] Extend {active} → exit {new_exit.time()} (same direction)")
+                active.exit_time = new_exit
+            else:
+                log.info(f"[{slot.time()}] No extension (flip/invalid/late). Keeping exit {active.exit_time.time()}.")
+
+        # 2) Entry decision (only if no active position)
+        if active is None and direction != 0:
+            side = direction_to_side(direction)
+            if can_hold_full_hour(slot):
+                log.info(f"[{slot.time()}] ENTRY {side} (both-trend agree). Base exit { (slot + timedelta(minutes=60)).time() }")
+                send_algomojo_signal(cfg, side)
+                active = Position(direction=direction, entry_time=slot, exit_time=slot + timedelta(minutes=60))
+            else:
+                log.info(f"[{slot.time()}] Valid signal but cannot hold full hour → skip.")
+
+        # 3) Timed exit if due
+        if active is not None and NOW() >= active.exit_time:
+            exit_side = opposite(direction_to_side(active.direction))
+            log.info(f"[{NOW().time()}] EXIT {exit_side} (planned {active.exit_time.time()})")
+            send_algomojo_signal(cfg, exit_side)
+            active = None
+
+    # Post-loop: if still holding, exit at its planned time (capped to 15:15)
+    if active is not None:
+        if active.exit_time > MARKET_CLOSE():
+            active.exit_time = MARKET_CLOSE()
+        if NOW() < active.exit_time:
+            log.info(f"Waiting for final exit at {active.exit_time.time()} IST…")
+            wait_until(active.exit_time, cfg.poll_sec)
+        exit_side = opposite(direction_to_side(active.direction))
+        log.info(f"[{NOW().time()}] FINAL EXIT {exit_side}")
+        send_algomojo_signal(cfg, exit_side)
 
 # -------------------- Main --------------------
 def main():
     cfg = Config()
-    if not cfg.alice_user_id or not cfg.alice_api_key:
-        log.error("Missing ALICE_USER_ID / ALICE_API_KEY")
-        sys.exit(1)
-
-    # Wait until 09:16 IST
-    while NOW() < MARKET_OPEN() + timedelta(minutes=1):
-        time.sleep(1)
-
-    master = load_master(cfg)
     alice = alice_connect(cfg)
-
-    # First run (all symbols)
-    gapups = detect_gapups(cfg, alice, master, first_run=True)
-    allocate_and_trade(cfg, gapups)
-
-    # Subsequent runs (only gap-up candidates, sequential)
-    # You can loop here if needed
-    # gapups2 = detect_gapups(cfg, alice, pd.DataFrame(gapups), first_run=False)
+    run_trend_chain(alice, cfg)
 
 if __name__ == "__main__":
     main()
