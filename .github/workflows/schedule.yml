@@ -16,35 +16,23 @@ concurrency:
 jobs:
   run-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # script may run until around 15:15 IST (~09:45 UTC)
+    timeout-minutes: 360  # script may run until ~15:15 IST (09:45 UTC)
 
     env:
-      # --- Required ENV for your script ---
       ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
       ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-
-      # Spot index name in AliceBlue (adjust if your broker uses a different string)
-      NIFTY_SYMBOL_SPOT: "NIFTY 50"
-
-      # Algomojo webhook (your provided URL)
       ALGOMOJO_WEBHOOK_URL: ${{ secrets.ALGOMOJO_WEBHOOK_URL }}
 
-      # Optional: change alert names if your Algomojo strategy expects different strings
+      NIFTY_SYMBOL_SPOT: "NIFTY 50"
       BUY_ALERT_NAME: "BUY"
       SELL_ALERT_NAME: "SELL"
-
-      # Set 0 to actually hit Algomojo; 1 for dry-run
       DRY_RUN: "0"
-
-      # Polling cadence while waiting for slots
       POLL_SEC: "5"
-
-      # Force runner timezone for logs (script uses Asia/Kolkata internally via pytz)
       TZ: "Asia/Kolkata"
 
     steps:
       - name: Checkout repo
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,7 +43,6 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # If you have a requirements.txt, prefer: pip install -r requirements.txt
           pip install pandas pytz requests pya3
 
       - name: Run NIFTY trend-chain engine
