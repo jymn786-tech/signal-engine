@@ -1,33 +1,36 @@
-name: NIFTY Trend-Chain (Algomojo)
+name: NIFTY Trend-Chain (Dual Webhooks)
 
 on:
   workflow_dispatch: {}
   schedule:
-    # 11:30 IST = 06:00 UTC, Mon–Fri
-    - cron: "0 6 * * 1-5"
+    - cron: "0 6 * * 1-5"   # 11:30 IST (06:00 UTC)
 
 permissions:
   contents: read
 
-concurrency:
-  group: nifty-trend-chain
-  cancel-in-progress: false
-
 jobs:
   run-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # script may run until ~15:15 IST (09:45 UTC)
+    timeout-minutes: 240
 
     env:
       ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
       ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-      ALGOMOJO_WEBHOOK_URL: ${{ secrets.ALGOMOJO_WEBHOOK_URL }}
 
-      NIFTY_SYMBOL_SPOT: "NIFTY 50"
+      # Two separate Algomojo webhooks
+      ALGOMOJO_WEBHOOK_LONG: ${{ secrets.ALGOMOJO_WEBHOOK_LONG }}
+      ALGOMOJO_WEBHOOK_SHORT: ${{ secrets.ALGOMOJO_WEBHOOK_SHORT }}
+
+      # Alert names
       BUY_ALERT_NAME: "BUY"
       SELL_ALERT_NAME: "SELL"
+      SHORT_ALERT_NAME: "SHORT"
+      COVER_ALERT_NAME: "COVER"
+
+      NIFTY_SYMBOL_SPOT: "NIFTY 50"
       DRY_RUN: "0"
       POLL_SEC: "5"
+      GRACE_SEC: "20"
       TZ: "Asia/Kolkata"
 
     steps:
@@ -38,13 +41,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas pytz requests pya3
 
-      - name: Run NIFTY trend-chain engine
+      - name: Run engine
         run: |
           python -u nifty_trend_chain.py
