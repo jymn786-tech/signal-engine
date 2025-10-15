@@ -4,9 +4,10 @@
 NIFTY Trend-Chain Engine → Algomojo Webhooks (Long & Short separated)
 ---------------------------------------------------------------------
 
-Same as previous version, but uses:
-- ALGOMOJO_WEBHOOK_LONG for BUY/SELL
-- ALGOMOJO_WEBHOOK_SHORT for SHORT/COVER
+Updated trade logic:
+- MARKET_CLOSE to 15:15
+- Last-hour trend uses open@window_start → close@t-1
+- 30-min chaining: extend on agreement, exit on disagreement
 """
 
 import os, sys, time, logging, pytz, requests
@@ -31,7 +32,7 @@ def AT(h, m):
     return n.replace(hour=h, minute=m, second=0, microsecond=0)
 
 MARKET_OPEN  = lambda: AT(10, 0)
-MARKET_CLOSE = lambda: AT(15, 0)
+MARKET_CLOSE = lambda: AT(15, 15)  # ⟵ was 15:00
 
 EVAL_SLOTS = [AT(11,30), AT(12,0), AT(12,30), AT(13,0), AT(13,30), AT(14,0)]
 GRACE_SEC = int(os.getenv("GRACE_SEC", "20"))
@@ -125,15 +126,24 @@ def sign(x: float) -> int:
     return 1 if x > 0 else (-1 if x < 0 else 0)
 
 def compute_direction(df: pd.DataFrame, eval_time) -> int:
+    """
+    Mixed (agreement) signal at eval_time using ONLY data before eval_time:
+      - Passed-day: first bar OPEN of day -> last CLOSE before eval_time
+      - Last-hour: 60-min window OPEN -> last CLOSE before eval_time
+    Returns: +1 (LONG), -1 (SHORT), 0 (no-trade)
+    """
     df_before = df.loc[df.index < eval_time]
-    if len(df_before) < 61:
+    if len(df_before) < 61:  # need at least 60 prior minutes + first bar
         return 0
-    day_open = float(df_before.iloc[0]["open"])
+
+    day_open   = float(df_before.iloc[0]["open"])
     last_close = float(df_before.iloc[-1]["close"])
-    hour_start = float(df_before.iloc[-60]["close"])
-    day_tr = sign(last_close - day_open)
-    hour_tr = sign(last_close - hour_start)
-    return day_tr if day_tr == hour_tr and day_tr != 0 else 0
+
+    hour_open = float(df_before.iloc[-60]["open"])   # <— open at start of the 60-min window
+    day_tr  = sign(last_close - day_open)
+    hour_tr = sign(last_close - hour_open)
+
+    return day_tr if (day_tr == hour_tr and day_tr != 0) else 0
 
 def direction_to_action(direction: int) -> str:
     return "BUY" if direction == 1 else "SHORT"
@@ -141,7 +151,8 @@ def direction_to_action(direction: int) -> str:
 def opposite_action(action: str) -> str:
     return {"BUY": "SELL", "SELL": "BUY", "SHORT": "COVER", "COVER": "SHORT"}[action]
 
-def can_hold_full_hour(t): return (t + timedelta(minutes=60)) <= MARKET_CLOSE()
+def can_hold_full_hour(t): 
+    return (t + timedelta(minutes=60)) <= MARKET_CLOSE()
 
 class Position:
     def __init__(self, direction, entry, exit):
@@ -154,9 +165,9 @@ class Position:
 def wait_until(ts, poll): 
     while NOW() < ts: time.sleep(poll)
 
-# -------------------- Engine --------------------
+# -------------------- Engine (UPDATED CHAINING LOGIC) --------------------
 def run_trend_chain(alice, cfg):
-    # Wait until 11:30
+    # Wait until first slot
     first_slot = EVAL_SLOTS[0]
     if NOW() < first_slot:
         log.info(f"Waiting until first slot {first_slot.time()} IST…")
@@ -165,28 +176,43 @@ def run_trend_chain(alice, cfg):
     active: Optional[Position] = None
 
     for slot in EVAL_SLOTS:
+        # Only consider slots that can hold a full hour into <= 15:15
         if not can_hold_full_hour(slot):
             continue
 
+        # Wake on the slot (within grace)
         now = NOW()
-        if now > slot and not within_grace(now, slot):
-            continue
         if now < slot:
             wait_until(slot, cfg.poll_sec)
+        now = NOW()
+        if not within_grace(now, slot):
+            continue  # missed the slot
 
+        # Build Mixed (agreement) at this slot with no look-ahead
         df = fetch_today_1min_nifty(alice, cfg)
-        direction = compute_direction(df, slot)
-        if active is None and direction != 0 and within_grace(NOW(), slot):
+        direction = compute_direction(df, slot)  # +1, -1, or 0
+
+        # --- CHAINING: extend-or-exit at boundary BEFORE exiting ---
+        if active is not None and within_grace(slot, active.exit_time):
+            if direction == active.direction and can_hold_full_hour(slot):
+                # Same direction at the next slot → extend +60m, do not exit
+                active.exit_time = slot + timedelta(minutes=60)
+                log.info(f"[{slot.time()}] EXTEND {'LONG' if active.direction==1 else 'SHORT'} → new exit {active.exit_time.time()}")
+                continue
+            else:
+                # Direction changed/invalid → exit now
+                exit_action = opposite_action(direction_to_action(active.direction))
+                log.info(f"[{slot.time()}] EXIT {exit_action}")
+                send_algomojo_signal(cfg, exit_action)
+                active = None
+                # do not "continue": we may also enter a fresh trade at this slot
+
+        # --- NEW ENTRY (only if flat and Mixed valid) ---
+        if active is None and direction != 0:
             action = direction_to_action(direction)
             log.info(f"[{slot.time()}] ENTRY {action}")
             send_algomojo_signal(cfg, action)
             active = Position(direction, slot, slot + timedelta(minutes=60))
-
-        if active and within_grace(NOW(), active.exit_time):
-            exit_action = opposite_action(direction_to_action(active.direction))
-            log.info(f"[{NOW().time()}] EXIT {exit_action}")
-            send_algomojo_signal(cfg, exit_action)
-            active = None
 
 # -------------------- Main --------------------
 def main():
