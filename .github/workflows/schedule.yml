@@ -1,9 +1,7 @@
 name: NIFTY Trend-Chain (Dual Webhooks)
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "0 6 * * 1-5"   # 11:30 IST (06:00 UTC)
+  workflow_dispatch: {}   # manual only
 
 permissions:
   contents: read
@@ -11,17 +9,15 @@ permissions:
 jobs:
   run-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300   # 11:30 → 15:00 with buffer
 
     env:
       ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
       ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
 
-      # Two separate Algomojo webhooks
       ALGOMOJO_WEBHOOK_LONG: ${{ secrets.ALGOMOJO_WEBHOOK_LONG }}
       ALGOMOJO_WEBHOOK_SHORT: ${{ secrets.ALGOMOJO_WEBHOOK_SHORT }}
 
-      # Alert names
       BUY_ALERT_NAME: "BUY"
       SELL_ALERT_NAME: "SELL"
       SHORT_ALERT_NAME: "SHORT"
@@ -31,6 +27,7 @@ jobs:
       DRY_RUN: "0"
       POLL_SEC: "5"
       GRACE_SEC: "20"
+      HEARTBEAT_SEC: "120"
       TZ: "Asia/Kolkata"
 
     steps:
@@ -47,6 +44,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas pytz requests pya3
 
-      - name: Run engine
+      - name: Run engine (waits until 11:30, then loops until 15:00 IST)
         run: |
           python -u nifty_trend_chain.py
