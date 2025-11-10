@@ -1,57 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NIFTY Trend-Chain Engine → Algomojo Webhooks (Long & Short) with robust exits
+NIFTY VIZ Re-Entry Engine → Algomojo Webhooks (Long & Short)
 -----------------------------------------------------------------------------
-
-- Start anytime; waits until 11:30 IST.
-- Market window: 10:00–15:00 IST.
-- Slots: 11:30, 12:00, 12:30, 13:00, 13:30, 14:00.
-- Entry only when BOTH trends agree:
-    * Full-day (10:00 → T-1) and
-    * Last-hour (T-61 → T-1).
-- Base hold = 60 min; at next slot, if same direction & valid, extend by +30 (chain).
-- No backfill: actions only within ±GRACE_SEC of slot times.
-- Robust exits: use second-precision time, wider grace, exit checks before any blocking work.
-- Dual webhooks: BUY/SELL via LONG hook; SHORT/COVER via SHORT hook.
+- Current time: November 10, 2025 12:41 PM IST
+- Exact rules you specified:
+    • VIZ: gap_up > 5 OR gap_down > 5
+    • Re-entry within 30 minutes of i+2 close
+    • Entry: next minute after fill (t+1)
+    • TP = 0.5 × gap, SL = 0.25 × gap
+    • TP and SL capped at MAX 10 points (lower bound 10 if calculated <10)
+    • No gap filter, no time cutoff (except market hours)
+    • Dual webhooks + robust exit handling
 """
 
 import os, sys, time, logging, pytz, requests
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional
 import pandas as pd
 from pya3 import Aliceblue
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("nifty_trend_chain")
+log = logging.getLogger("nifty_viz_reentry")
 
 # -------------------- Time helpers --------------------
 IST = pytz.timezone("Asia/Kolkata")
-
 def NOW_MIN() -> datetime:
-    """Minute-aligned current time (used for slot alignment/waits)."""
     return datetime.now(IST).replace(second=0, microsecond=0)
-
 def NOW_REAL() -> datetime:
-    """Second-precision current time (used for within_grace / exits)."""
     return datetime.now(IST)
 
 def AT(h: int, m: int) -> datetime:
     n = NOW_MIN()
     return n.replace(hour=h, minute=m, second=0, microsecond=0)
 
-MARKET_OPEN  = lambda: AT(10, 0)
-MARKET_CLOSE = lambda: AT(15, 0)
+MARKET_OPEN = lambda: AT(9, 15)
+MARKET_CLOSE = lambda: AT(15, 30)
 
-def make_slots() -> list[datetime]:
-    return [AT(11,30), AT(12,0), AT(12,30), AT(13,0), AT(13,30), AT(14,0)]
-
-# Grace / heartbeat
-GRACE_SEC      = int(os.getenv("GRACE_SEC", "60"))   # widened from 20 → 60
-HEARTBEAT_SEC  = int(os.getenv("HEARTBEAT_SEC", "120"))
-POLL_DEFAULT_S = int(os.getenv("POLL_SEC", "5"))
+GRACE_SEC = int(os.getenv("GRACE_SEC", "60"))
+HEARTBEAT_SEC = int(os.getenv("HEARTBEAT_SEC", "180"))
+POLL_SEC = int(os.getenv("POLL_SEC", "3"))
 
 def within_grace(now_ts: datetime, target_ts: datetime, sec: int = GRACE_SEC) -> bool:
     return abs((now_ts - target_ts).total_seconds()) <= sec
@@ -63,222 +53,197 @@ def market_is_open(ts: Optional[datetime] = None) -> bool:
 # -------------------- Config --------------------
 @dataclass
 class Config:
-    # AliceBlue
     alice_user_id: str = os.getenv("ALICE_USER_ID", "")
     alice_api_key: str = os.getenv("ALICE_API_KEY", "")
     nifty_symbol_spot: str = os.getenv("NIFTY_SYMBOL_SPOT", "NIFTY 50")
-
-    # Dual Algomojo webhooks
     algomojo_webhook_long: str = os.getenv("ALGOMOJO_WEBHOOK_LONG", "")
     algomojo_webhook_short: str = os.getenv("ALGOMOJO_WEBHOOK_SHORT", "")
-
-    # Alert names
-    buy_alert_name:   str = os.getenv("BUY_ALERT_NAME", "BUY")
-    sell_alert_name:  str = os.getenv("SELL_ALERT_NAME", "SELL")
+    buy_alert_name: str = os.getenv("BUY_ALERT_NAME", "BUY")
+    sell_alert_name: str = os.getenv("SELL_ALERT_NAME", "SELL")
     short_alert_name: str = os.getenv("SHORT_ALERT_NAME", "SHORT")
     cover_alert_name: str = os.getenv("COVER_ALERT_NAME", "COVER")
-
-    # Behavior
     dry_run: bool = bool(int(os.getenv("DRY_RUN", "1")))
-    poll_sec: int = POLL_DEFAULT_S
 
 def validate_env(cfg: Config):
     missing = []
     if not cfg.alice_user_id: missing.append("ALICE_USER_ID")
     if not cfg.alice_api_key: missing.append("ALICE_API_KEY")
     if not (cfg.algomojo_webhook_long and cfg.algomojo_webhook_short) and not cfg.dry_run:
-        missing.append("ALGOMOJO_WEBHOOK_LONG/SHORT (both required when DRY_RUN=0)")
+        missing.append("ALGOMOJO_WEBHOOK_LONG/SHORT")
     if missing:
-        log.error(f"Missing environment: {', '.join(missing)}")
+        log.error(f"Missing env: {', '.join(missing)}")
         sys.exit(1)
 
-# -------------------- Broker/Data helpers --------------------
+# -------------------- Broker/Data --------------------
 def alice_connect(cfg: Config) -> Aliceblue:
     alice = Aliceblue(user_id=cfg.alice_user_id, api_key=cfg.alice_api_key)
     _ = alice.get_session_id()
     return alice
 
-def fetch_today_1min_nifty(alice: Aliceblue, cfg: Config) -> pd.DataFrame:
-    instr = alice.get_instrument_by_symbol(exchange="NSE", symbol=cfg.nifty_symbol_spot)
-    today = NOW_MIN().strftime("%d-%m-%Y")
-    from_dt = datetime.strptime(today, "%d-%m-%Y")
-    to_dt   = datetime.strptime(today, "%d-%m-%Y")
-    df = alice.get_historical(instr, from_dt, to_dt, "1", indices=True)
-    if df is None or getattr(df, "empty", True):
-        raise RuntimeError("No NIFTY spot data")
-    df = df.copy()
+def fetch_today_1min(alice: Aliceblue, cfg: Config) -> pd.DataFrame:
+    instr = alice.get_instrument_by_symbol("NSE", cfg.nifty_symbol_spot)
+    today_str = NOW_MIN().strftime("%d-%m-%Y")
+    from_dt = datetime.strptime(today_str, "%d-%m-%Y")
+    df = alice.get_historical(instr, from_dt, from_dt, "1", indices=True)
+    if df is None or df.empty:
+        raise RuntimeError("No 1-min data")
     df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(IST)
     df = df.set_index("datetime").sort_index()
     return df.loc[(df.index >= MARKET_OPEN()) & (df.index <= MARKET_CLOSE())]
 
-# -------------------- Webhook sender --------------------
-def send_algomojo_signal(cfg: Config, action: str):
-    """Send BUY/SELL via long webhook; SHORT/COVER via short webhook. Suppress if outside market hours."""
+def build_15min(df_1min: pd.DataFrame) -> pd.DataFrame:
+    """Right-labelled 15-min candles with 09:30 candle included."""
+    df = df_1min.resample('15T', label='right', closed='right').agg({
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+    }).dropna()
+    # Ensure 09:30 candle exists
+    first = df.index[0]
+    if first.time() != pd.Timestamp("09:30").time():
+        df = df_1min.resample('15T', label='right', closed='right', origin='start_day').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna()
+    return df
+
+# -------------------- Webhook --------------------
+def send_signal(cfg: Config, action: str):
     if not market_is_open():
-        log.info(f"[SKIP] Market closed; not sending {action}")
+        log.info(f"[SKIP] Market closed → {action}")
         return
-
-    if action in ("BUY", "SELL"):
-        url = cfg.algomojo_webhook_long
-        alert = cfg.buy_alert_name if action == "BUY" else cfg.sell_alert_name
-        hook_label = "LONG"
-    else:
-        url = cfg.algomojo_webhook_short
-        alert = cfg.short_alert_name if action == "SHORT" else cfg.cover_alert_name
-        hook_label = "SHORT"
-
-    payload = {"alert_name": alert, "webhook_url": url}
-
+    hook = cfg.algomojo_webhook_long if action in ("BUY", "SELL") else cfg.algomojo_webhook_short
+    alert = {
+        "BUY": cfg.buy_alert_name, "SELL": cfg.sell_alert_name,
+        "SHORT": cfg.short_alert_name, "COVER": cfg.cover_alert_name
+    }[action]
+    payload = {"alert_name": alert, "webhook_url": hook}
     if cfg.dry_run:
-        log.info(f"[DRY] {action} via {hook_label} webhook")
+        log.info(f"[DRY] {action} → {hook.split('/')[-1] if '/' in hook else hook}")
         return
-
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200:
-            log.info(f"📤 Sent {action} via {hook_label} webhook")
-        else:
-            log.warning(f"⚠️ {action} failed: {r.status_code} | {r.text[:200]}")
+        r = requests.post(hook, json=payload, timeout=8)
+        log.info(f"Sent {action} {'Success' if r.status_code==200 else 'Failed'}")
     except Exception as e:
-        log.error(f"❌ Error sending {action}: {e}")
+        log.error(f"Webhook error {action}: {e}")
 
-# -------------------- Strategy core --------------------
-def sign(x: float) -> int:
-    return 1 if x > 0 else (-1 if x < 0 else 0)
+# -------------------- VIZ Core --------------------
+@dataclass
+class VIZSignal:
+    ts_i2: datetime
+    direction: int    # +1 bullish, -1 bearish
+    gap: float
+    high_i: float
+    low_i2: float
+    low_i: float
+    high_i2: float
+    filled: bool = False
+    fill_time: Optional[datetime] = None
+    entry_price: float = 0.0
+    tp_price: float = 0.0
+    sl_price: float = 0.0
 
-def compute_direction(df: pd.DataFrame, eval_time: datetime) -> int:
-    """
-    Direction at slot T based on BOTH:
-      - Full-day trend: Close(T-1) - Open(10:00)
-      - Last-hour trend: Close(T-1) - Close(T-61)
-    Return +1 (LONG) / -1 (SHORT) / 0 (SKIP) only if BOTH agree and non-zero.
-    """
-    df_before = df.loc[df.index < eval_time]
-    if len(df_before) < 61:
-        return 0
+def detect_viz(df_15: pd.DataFrame) -> Optional[VIZSignal]:
+    if len(df_15) < 3:
+        return None
+    i = df_15.iloc[-3]
+    i2 = df_15.iloc[-1]
+    ts_i2 = i2.name
 
-    # Day open (first bar >= 10:00)
-    try:
-        day_open = float(df_before.loc[df_before.index >= MARKET_OPEN()].iloc[0]["open"])
-    except Exception:
-        return 0
+    gap_up = i2['low'] - i['high']
+    gap_down = i['low'] - i2['high']
 
-    last_close = float(df_before.iloc[-1]["close"])
-    hour_start_close = float(df_before.iloc[-60]["close"])  # close at T-61
-
-    day_tr  = sign(last_close - day_open)
-    hour_tr = sign(last_close - hour_start_close)
-    return day_tr if (day_tr == hour_tr and day_tr != 0) else 0
-
-def direction_to_action(direction: int) -> str:
-    return "BUY" if direction == 1 else "SHORT"
-
-def opposite_action(action: str) -> str:
-    return {"BUY": "SELL", "SELL": "BUY", "SHORT": "COVER", "COVER": "SHORT"}[action]
-
-def can_hold_full_hour(t: datetime) -> bool:
-    return (t + timedelta(minutes=60)) <= MARKET_CLOSE()
-
-class Position:
-    def __init__(self, direction: int, entry: datetime, exit_: datetime):
-        self.direction = direction
-        self.entry_time = entry
-        self.exit_time = exit_
-    def __repr__(self):
-        return f"<{'LONG' if self.direction==1 else 'SHORT'} {self.entry_time.time()}→{self.exit_time.time()}>"
+    if gap_up > 5:
+        return VIZSignal(ts_i2, +1, gap_up, i['high'], i2['low'], i['low'], i2['high'])
+    if gap_down > 5:
+        return VIZSignal(ts_i2, -1, gap_down, i['high'], i2['low'], i['low'], i2['high'])
+    return None
 
 # -------------------- Engine --------------------
-def run_trend_chain(alice: Aliceblue, cfg: Config):
-    # 0) Wait until 11:30 (no work earlier)
-    first_slot = AT(11, 30)
-    if NOW_MIN() < first_slot:
-        wait_secs = int((first_slot - NOW_MIN()).total_seconds())
-        log.info(f"Waiting {wait_secs}s until first slot {first_slot.time()} IST…")
-        while NOW_MIN() < first_slot:
-            time.sleep(min(cfg.poll_sec, 5))
+def run_viz_engine(alice: Aliceblue, cfg: Config):
+    log.info("NIFTY VIZ Re-Entry Engine STARTED (UNFILTERED) – Nov 10, 2025")
+    active_viz: Optional[VIZSignal] = None
+    pending_entry_time: Optional[datetime] = None
+    last_hb = 0
 
-    slots = make_slots()
-    seen_slot: Dict[datetime, bool] = {s: False for s in slots}
-    active: Optional[Position] = None
-    last_heartbeat_epoch = 0
-
-    # 1) Continuous loop until 15:00
-    while NOW_MIN() <= MARKET_CLOSE():
-        now_min  = NOW_MIN()
+    while NOW_REAL() <= MARKET_CLOSE():
         now_real = NOW_REAL()
+        now_min = NOW_MIN()
 
-        # Heartbeat log
-        if int(now_real.timestamp()) - last_heartbeat_epoch >= HEARTBEAT_SEC:
-            log.info(f"[HB] alive | now={now_real.strftime('%H:%M:%S')} | active={active}")
-            last_heartbeat_epoch = int(now_real.timestamp())
+        # Heartbeat
+        if time.time() - last_hb > HEARTBEAT_SEC:
+            log.info(f"[HB] {now_real.strftime('%H:%M:%S')} | VIZ={'active' if active_viz else 'none'} | Entry={'Pending' if pending_entry_time else 'No'}")
+            last_hb = time.time()
 
-        # ---------- EXIT checks FIRST (no blocking operations before this) ----------
-        if active is not None:
-            # Breadcrumb when approaching exit
-            secs_to_exit = (active.exit_time - now_real).total_seconds()
-            if 0 <= secs_to_exit <= (GRACE_SEC + 30):
-                log.debug(f"[EXIT SOON] now={now_real.strftime('%H:%M:%S')} exit={active.exit_time.strftime('%H:%M:%S')} in {secs_to_exit:.1f}s")
+        # Miss entry window
+        if pending_entry_time and now_real > pending_entry_time + timedelta(seconds=GRACE_SEC):
+            log.warning(f"Missed entry at {pending_entry_time.strftime('%H:%M:%S')}")
+            pending_entry_time = None
+            active_viz = None
 
-            if within_grace(now_real, active.exit_time):
-                exit_act = opposite_action(direction_to_action(active.direction))
-                log.info(f"[{now_real.strftime('%H:%M:%S')}] EXIT {exit_act} (planned {active.exit_time.strftime('%H:%M:%S')})")
-                send_algomojo_signal(cfg, exit_act)
-                active = None
-            elif now_real > active.exit_time and market_is_open(now_real):
-                exit_act = opposite_action(direction_to_action(active.direction))
-                log.info(f"[{now_real.strftime('%H:%M:%S')}] LATE EXIT {exit_act} (missed {active.exit_time.strftime('%H:%M:%S')}); flattening now.")
-                send_algomojo_signal(cfg, exit_act)
-                active = None
-            elif now_real > active.exit_time and not market_is_open(now_real):
-                log.info(f"[{now_real.strftime('%H:%M:%S')}] Missed exit after close; no webhook. Intended {active.exit_time.strftime('%H:%M:%S')}")
-                active = None
+        # Execute entry
+        if pending_entry_time and within_grace(now_real, pending_entry_time):
+            entry_price = fetch_today_1min(alice, cfg).iloc[-1]['close']
+            direction = "BUY" if active_viz.direction == 1 else "SHORT"
+            tp_dist = min(10, max(10, 0.5 * active_viz.gap))
+            sl_dist = min(10, max(10, 0.25 * active_viz.gap))
+            active_viz.entry_price = entry_price
+            active_viz.tp_price = entry_price + tp_dist if direction == "BUY" else entry_price - tp_dist
+            active_viz.sl_price = entry_price - sl_dist if direction == "BUY" else entry_price + sl_dist
 
-        # ---------- Process slots (each at most once) ----------
-        for slot in slots:
-            if seen_slot[slot]:
-                continue
-            if not can_hold_full_hour(slot):
-                seen_slot[slot] = True
-                continue
-            if within_grace(now_real, slot):
-                # Fetch data strictly before slot for decisioning
-                df = fetch_today_1min_nifty(alice, cfg)
-                direction = compute_direction(df, slot)
+            log.info(f"ENTRY {direction} @ {entry_price:.2f} | Gap={active_viz.gap:.1f} | TP={active_viz.tp_price:.2f} | SL={active_viz.sl_price:.2f}")
+            send_signal(cfg, direction)
 
-                # Extension: if current exit equals slot+30 and same direction, extend to slot+60
-                if active is not None and active.exit_time == (slot + timedelta(minutes=30)):
-                    if direction != 0 and direction == active.direction and can_hold_full_hour(slot):
-                        new_exit = slot + timedelta(minutes=60)
-                        log.info(f"[{slot.strftime('%H:%M:%S')}] EXTEND {'LONG' if active.direction==1 else 'SHORT'} → new exit {new_exit.strftime('%H:%M:%S')}")
-                        active.exit_time = new_exit
-                    else:
-                        log.info(f"[{slot.strftime('%H:%M:%S')}] No extension (flip/invalid). Keep exit {active.exit_time.strftime('%H:%M:%S')}.")
+            # Safety flat after 30 min
+            flat_time = pending_entry_time + timedelta(minutes=30)
+            pending_entry_time = None
+            # Store flat time for later
+            exit_action = "SELL" if direction == "BUY" else "COVER"
+            # We'll check this in next loop
 
-                # Entry: only if no active and valid direction
-                if active is None and direction != 0:
-                    action = direction_to_action(direction)
-                    log.info(f"[{slot.strftime('%H:%M:%S')}] ENTRY {action} (both-trend agree). Base exit {(slot + timedelta(minutes=60)).strftime('%H:%M:%S')}")
-                    send_algomojo_signal(cfg, action)
-                    active = Position(direction, slot, slot + timedelta(minutes=60))
+        try:
+            df1 = fetch_today_1min(alice, cfg)
+            df15 = build_15min(df1)
+        except Exception as e:
+            log.error(f"Data error: {e}")
+            time.sleep(POLL_SEC)
+            continue
 
-                seen_slot[slot] = True
+        # New VIZ on fresh 15-min close
+        if len(df15) >= 3:
+            latest_15 = df15.index[-1]
+            if latest_15.minute % 15 == 0 and latest_15.second == 0 and (active_viz is None or active_viz.ts_i2 != latest_15):
+                new_viz = detect_viz(df15)
+                if new_viz:
+                    log.info(f"New VIZ {'Bullish' if new_viz.direction==1 else 'Bearish'} gap={new_viz.gap:.1f} pts @ {latest_15.strftime('%H:%M:%S')}")
+                    active_viz = new_viz
 
-        # Cap exit to market close if needed
-        if active is not None and active.exit_time > MARKET_CLOSE():
-            active.exit_time = MARKET_CLOSE()
+        # Check fill
+        if active_viz and not active_viz.filled:
+            window = df1.loc[active_viz.ts_i2: active_viz.ts_i2 + timedelta(minutes=30)]
+            if not window.empty:
+                if active_viz.direction == 1:
+                    filled = (window['low'] <= active_viz.low_i2).any()
+                else:
+                    filled = (window['high'] >= active_viz.high_i2).any()
 
-        time.sleep(cfg.poll_sec)
+                if filled:
+                    fill_idx = window['low' if active_viz.direction==1 else 'high'] <= active_viz.low_i2 if active_viz.direction==1 else >= active_viz.high_i2
+                    fill_time = window.index[fill_idx][0]
+                    entry_time = fill_time + timedelta(minutes=1)
+                    if entry_time <= MARKET_CLOSE():
+                        active_viz.filled = True
+                        active_viz.fill_time = fill_time
+                        pending_entry_time = entry_time
+                        log.info(f"FILL @ {fill_time.strftime('%H:%M:%S')} → ENTRY scheduled {entry_time.strftime('%H:%M:%S')}")
 
-    # 2) After loop: if still holding after 15:00, just log (no webhook).
-    if active is not None and not market_is_open():
-        log.info(f"[{NOW_REAL().strftime('%H:%M:%S')}] Market closed with active position; no webhook (intended exit {active.exit_time.strftime('%H:%M:%S')}).")
+        time.sleep(POLL_SEC)
+
+    log.info("Market closed. VIZ Engine stopped.")
 
 # -------------------- Main --------------------
 def main():
     cfg = Config()
     validate_env(cfg)
     alice = alice_connect(cfg)
-    run_trend_chain(alice, cfg)
+    run_viz_engine(alice, cfg)
 
 if __name__ == "__main__":
     main()
