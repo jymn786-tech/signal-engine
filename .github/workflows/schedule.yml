@@ -1,37 +1,34 @@
-name: NIFTY Trend-Chain (Dual Webhooks)
+## User Info
+# Current time: November 10, 2025 12:45 PM IST
+# Country: IN
 
+name: NIFTY VIZ Re-Entry (Dual Webhooks)
 on:
-  workflow_dispatch: {}   # manual only
-
+  workflow_dispatch: {} # Manual trigger only
 permissions:
   contents: read
 
 jobs:
-  run-engine:
+  run-viz-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # 11:30 → 15:00 with buffer
-
+    timeout-minutes: 390 # 09:15 → 15:30 + 30 min buffer
     env:
       ALICE_USER_ID: ${{ secrets.ALICE_USER_ID }}
       ALICE_API_KEY: ${{ secrets.ALICE_API_KEY }}
-
       ALGOMOJO_WEBHOOK_LONG: ${{ secrets.ALGOMOJO_WEBHOOK_LONG }}
       ALGOMOJO_WEBHOOK_SHORT: ${{ secrets.ALGOMOJO_WEBHOOK_SHORT }}
-
       BUY_ALERT_NAME: "BUY"
       SELL_ALERT_NAME: "SELL"
       SHORT_ALERT_NAME: "SHORT"
       COVER_ALERT_NAME: "COVER"
-
       NIFTY_SYMBOL_SPOT: "NIFTY 50"
-      DRY_RUN: "0"
-      POLL_SEC: "5"
-      GRACE_SEC: "20"
-      HEARTBEAT_SEC: "120"
-      TZ: "Asia/Kolkata"
-
+      DRY_RUN: "0"                    # Set to "1" for testing
+      POLL_SEC: "3"                   # Faster polling for t+1 entry accuracy
+      GRACE_SEC: "60"                 # Wider grace for reliable execution
+      HEARTBEAT_SEC: "180"            # Heartbeat every 3 min
+      TZ: "Asia/Kolkata"              # Critical for correct time
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -44,6 +41,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas pytz requests pya3
 
-      - name: Run engine (waits until 11:30, then loops until 15:00 IST)
+      - name: Show current IST time (debug)
         run: |
-          python -u nifty_trend_chain.py
+          echo "Current IST time:"
+          date
+
+      - name: Run VIZ Re-Entry Engine
+        run: |
+          python -u viz_reentry_unfiltered.py
