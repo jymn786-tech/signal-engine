@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import pandas as pd
 from pya3 import Aliceblue
-from scipy.stats import rankdata
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -143,8 +142,8 @@ class CandidateSignal:
 def percentile_rank(series: pd.Series) -> pd.Series:
     if len(series) == 0:
         return series
-    r = rankdata(series, method='average')
-    return (r - 1) / (len(series) - 1) if len(series) > 1 else pd.Series([1.0]*len(series), index=series.index)
+    r = series.rank(method="average", pct=True)
+    return r.clip(0, 1).fillna(0)
 
 # append header to log if not exists
 def ensure_log_file(path: str):
