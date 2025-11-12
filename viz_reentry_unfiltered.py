@@ -87,8 +87,8 @@ def fetch_today_1min(alice: Aliceblue, cfg: Config) -> pd.DataFrame:
 
 def build_5min_from_1min(df_1min: pd.DataFrame) -> pd.DataFrame:
     # Build 5-min candles aligned so label='right' covers previous 5 minutes
-    five = df_1min.resample('5T', label='right', closed='right').agg({
-        'open':'first','high':'max','low':'min','close':'last'
+    five = df_1min.resample('5min', label='right', closed='right').agg({
+    'open':'first','high':'max','low':'min','close':'last'
     }).dropna()
     # compute range and ATR(14) on 5-min
     five['range'] = five['high'] - five['low']
